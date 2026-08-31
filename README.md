@@ -26,6 +26,8 @@ The extension needs the container. The container does not need the extension.
 
 - **Persistent queue** — SQLite under your config volume. Survives restarts; a
   job that was running when the container died is re-queued rather than lost.
+- **Reorderable queue** — drag a queued row, or hit ⤒/⤓ to send it to the front
+  or the back. See [Queue order](#queue-order).
 - **Real progress, not a spinner** — iw3 drives tqdm, which already computes
   percentage, frame counts, rate and remaining time. The backend parses those
   rather than inventing its own numbers. The scene-detection pre-pass draws its
@@ -112,6 +114,47 @@ first use.
 If you pick a model whose checkpoint is missing, iw3 fails with a
 `FileNotFoundError` naming the exact path — that is iw3's own behaviour, not a
 check added here.
+
+## Queue order
+
+Queued rows are draggable, and each carries ⤒ (run next) and ⤓ (run last).
+Dragging is the better gesture over a screenful; the buttons are the ones you
+want when the queue is a hundred deep and the row you care about is off-screen.
+
+The order lives in a `position` column and is the single key the worker, the
+ETA total and the table all sort by — so the order on screen is the order the
+GPU will work through. Existing databases are migrated on first start: the
+queue is seeded from the order it already had, so an upgrade mid-queue does not
+shuffle anything.
+
+Two things deliberately cannot be dragged:
+
+- **The running job.** It is already on the GPU, and nothing in the queue
+  interrupts work in progress. It always sorts first, and moving it is a 409.
+- **Finished jobs.** They are not in the queue to begin with.
+
+Previews still jump to the front when created, for the reason in
+[Preview](#preview) below — but that is now an *insertion* rule rather than a
+sort rule. Once queued, a preview reorders like any other row. The queue has
+exactly one order, and it is the one you can see.
+
+Reordering from the outside:
+
+```sh
+# run this job next
+curl -X POST localhost:8790/api/jobs/<id>/move \
+     -H 'Content-Type: application/json' -d '{"to":"top"}'
+# to, bottom, up and down are all accepted
+
+# or set the whole order at once
+curl -X POST localhost:8790/api/queue/reorder \
+     -H 'Content-Type: application/json' -d '{"order":["<id>","<id>", ...]}'
+```
+
+`/api/queue/reorder` is a merge, not an assignment: ids it no longer has queued
+are ignored, and queued ids you left out keep their relative order behind the
+ones you sent. A browser tab that is a few seconds stale therefore cannot lose
+or resurrect a job by dragging one row.
 
 ## Preview
 

@@ -45,6 +45,17 @@
   .status-failed { background: #3d1f1f; color: var(--err); }
   .status-canceled { background: #333; color: var(--muted); }
   .job-actions button { padding: 3px 8px; font-size: 11px; }
+  /* Queue order is edited in place, so the rows have to look draggable before
+     anyone tries it: a grip, a grab cursor, and a gap where the row will land. */
+  tr.queued-row { cursor: grab; }
+  tr.queued-row.dragging { opacity: .4; cursor: grabbing; }
+  tr.queued-row.dragging td { background: #2c3550; }
+  td.pos { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums;
+           width: 1%; user-select: none; }
+  td.pos .grip { color: #555b68; margin-right: 6px; letter-spacing: -1px; }
+  tr.queued-row:hover td.pos .grip { color: var(--accent); }
+  td.pos .next { color: var(--accent); font-weight: 600; }
+  .move button { padding: 2px 6px; font-size: 11px; line-height: 1; background: #333844; }
   .bar { position: relative; height: 6px; background: #10131a; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; min-width: 130px; }
   .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
   /* The scene-detection pre-pass reports no total, so there is no honest
@@ -96,9 +107,9 @@
   </div>
 
   <div class="panel full">
-    <h2>Job queue <span id="queueSummary"></span></h2>
+    <h2>Job queue <span id="queueSummary"></span><span id="queueHint" class="help" style="float:right;text-transform:none;letter-spacing:0">drag a queued row to reorder &middot; &#10514; run next &middot; &#10515; run last</span></h2>
     <table>
-      <thead><tr><th>Created</th><th>Mode</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
+      <thead><tr><th title="Drag a queued row to reorder it">#</th><th>Created</th><th>Mode</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
       <tbody id="jobRows"></tbody>
     </table>
     <div id="log"></div>
@@ -309,14 +320,94 @@ async function refreshQueueSummary() {
   }
 }
 
+// --- Queue reordering ---------------------------------------------------
+// Native HTML5 drag and drop, no library: the row follows the pointer, and the
+// server is told the resulting order once, on drop.
+const drag = { id: null, dropped: false };
+
+function queuedRows() {
+  return [...document.querySelectorAll("#jobRows tr.queued-row")];
+}
+
+// The queued row the dragged one should land in front of, or null for "past
+// the last one". Only queued rows count as landing places, which is what keeps
+// a row from being dropped above the running job or down among the history.
+function dropAnchor(y) {
+  for (const row of queuedRows()) {
+    if (row.classList.contains("dragging")) continue;
+    const box = row.getBoundingClientRect();
+    if (y < box.top + box.height / 2) return row;
+  }
+  return null;
+}
+
+async function commitOrder() {
+  const order = queuedRows().map(r => r.dataset.id);
+  try {
+    await api("/queue/reorder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order }),
+    });
+  } catch (e) {
+    alert("Could not save the new queue order:\n\n" + e.message);
+  }
+  await refreshJobs();
+}
+
+async function moveJob(id, to) {
+  try {
+    await api(`/jobs/${id}/move`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to }),
+    });
+  } catch (e) {
+    alert("Could not move the job:\n\n" + e.message);
+  }
+  await refreshJobs();
+}
+
+function initQueueDnd() {
+  const tbody = document.getElementById("jobRows");
+  tbody.addEventListener("dragover", (e) => {
+    if (!drag.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const dragged = tbody.querySelector("tr.dragging");
+    if (!dragged) return;
+    const anchor = dropAnchor(e.clientY);
+    if (anchor) { tbody.insertBefore(dragged, anchor); return; }
+    const firstHistory = tbody.querySelector("tr.history-row");
+    if (firstHistory) tbody.insertBefore(dragged, firstHistory);
+    else tbody.appendChild(dragged);
+  });
+  tbody.addEventListener("drop", (e) => {
+    if (!drag.id) return;
+    e.preventDefault();
+    drag.dropped = true;
+  });
+}
+
 async function refreshJobs() {
+  // Rebuilding the table under a drag in progress would tear the row out of
+  // the user's hand mid-gesture. The 3s poll waits.
+  if (drag.id) return;
   const jobs = await api("/jobs");
   const tbody = document.getElementById("jobRows");
   tbody.innerHTML = "";
   for (const j of jobs) {
     const tr = document.createElement("tr");
+    tr.dataset.id = j.id;
+    const queued = j.status === "queued";
+    tr.className = queued ? "queued-row"
+                  : j.status === "running" ? "running-row" : "history-row";
     const created = new Date(j.created_at).toLocaleString();
+    const pos = queued
+      ? `<span class="grip">&#10303;</span><span class="${j.queue_index === 1 ? "next" : ""}">${j.queue_index}</span>`
+      : j.status === "running" ? `<span class="next">&#9654;</span>` : "";
     tr.innerHTML = `
+      <td class="pos">${pos}</td>
       <td>${created}</td>
       <td>${j.mode}</td>
       <td title="${j.input_path}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.input_path}</td>
@@ -326,7 +417,44 @@ async function refreshJobs() {
       <td class="eta">${etaCell(j)}</td>
       <td class="job-actions"></td>
     `;
+    if (queued) {
+      tr.draggable = true;
+      tr.addEventListener("dragstart", (e) => {
+        drag.id = j.id;
+        drag.dropped = false;
+        tr.classList.add("dragging");
+        e.dataTransfer.effectAllowed = "move";
+        // Firefox will not start a drag at all without payload on the transfer.
+        e.dataTransfer.setData("text/plain", j.id);
+      });
+      tr.addEventListener("dragend", async () => {
+        tr.classList.remove("dragging");
+        const dropped = drag.dropped;
+        drag.id = null;
+        drag.dropped = false;
+        // Escape, or a drop outside the table: the rows have been moving under
+        // the pointer all along, so put them back rather than saving a gesture
+        // the user just took back.
+        if (dropped) await commitOrder(); else await refreshJobs();
+      });
+    }
     const actions = tr.querySelector(".job-actions");
+    if (queued) {
+      // Dragging is fine over a screenful. A queue a hundred deep is why this
+      // feature was asked for, and "run this next" should not require holding
+      // the mouse down while the page scrolls.
+      const move = document.createElement("span");
+      move.className = "move";
+      for (const [label, to, title] of [["\u2912", "top", "Run next"],
+                                         ["\u2913", "bottom", "Run last"]]) {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.title = title;
+        b.onclick = () => moveJob(j.id, to);
+        move.appendChild(b);
+      }
+      actions.appendChild(move);
+    }
     const logBtn = document.createElement("button");
     logBtn.className = "secondary";
     logBtn.textContent = "Log";
@@ -401,6 +529,7 @@ function showLog(jobId) {
   schema = await api("/schema");
   renderSettingsForm();
   await loadBrowser("");
+  initQueueDnd();
   await refreshJobs();
   setInterval(refreshJobs, 3000);
 })();

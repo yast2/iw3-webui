@@ -189,10 +189,26 @@ def _init_db():
                 created_at TEXT NOT NULL,
                 started_at TEXT,
                 finished_at TEXT,
-                error TEXT
+                error TEXT,
+                position INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Queue order used to be created_at, which made "run this one next" a
+        # question of falsifying a timestamp. It is an explicit column now.
+        # Existing databases are seeded from the order the old sort key
+        # produced, so a queue that is days deep keeps running in exactly the
+        # order it had when the upgrade landed.
+        columns = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+        if "position" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+            seed = conn.execute(
+                "SELECT id FROM jobs WHERE status IN ('running','queued') "
+                "ORDER BY mode <> 'preview', created_at"
+            ).fetchall()
+            for i, row in enumerate(seed, start=1):
+                conn.execute("UPDATE jobs SET position=? WHERE id=?", (i, row["id"]))
         # Crash recovery: a 'running' row means the container died mid-job.
+        # It keeps its position, so it is picked up again first.
         conn.execute("UPDATE jobs SET status='queued', started_at=NULL "
                       "WHERE status='running'")
 
@@ -211,6 +227,37 @@ _job_progress: dict[str, dict] = {}
 
 def _now():
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Queue order
+#
+# `position` is the single sort key the worker, the ETA sum and the table all
+# read, so what the queue shows is what the queue will do. It is rewritten
+# dense (1..N) after every change rather than nudged: at a hundred-odd active
+# rows renumbering costs nothing, and it rules out the drift that fractional
+# or gap-based schemes accumulate after enough reorders.
+#
+# The running job is not part of the orderable set. It is already on the GPU
+# and nothing here interrupts it - it simply always sorts first.
+# ---------------------------------------------------------------------------
+def _queued_ids(conn):
+    return [r["id"] for r in conn.execute(
+        "SELECT id FROM jobs WHERE status='queued' ORDER BY position, created_at")]
+
+
+def _apply_queue_order(conn, ids):
+    """Renumber the queue to `ids`, running job first."""
+    running = [r["id"] for r in conn.execute(
+        "SELECT id FROM jobs WHERE status='running' ORDER BY position, created_at")]
+    for i, job_id in enumerate(running + list(ids), start=1):
+        conn.execute("UPDATE jobs SET position=? WHERE id=?", (i, job_id))
+
+
+def _next_position(conn):
+    row = conn.execute("SELECT MAX(position) AS m FROM jobs "
+                        "WHERE status IN ('running','queued')").fetchone()
+    return (row["m"] or 0) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -729,14 +776,12 @@ async def _run_job(job_id):
 async def _worker_loop():
     while True:
         with _db() as conn:
-            # Previews go first. The whole point of a preview is to see the
-            # settings before committing the hours a full conversion costs -
-            # behind a queue that is days deep it would answer the question
-            # long after the question stopped mattering. It still waits for the
-            # running job: nothing here interrupts work already on the GPU.
+            # One sort key, set by create_job and by the reorder endpoints.
+            # created_at only breaks ties between rows that somehow share a
+            # position; it no longer decides anything on its own.
             row = conn.execute(
                 "SELECT id FROM jobs WHERE status='queued' "
-                "ORDER BY mode <> 'preview', created_at LIMIT 1"
+                "ORDER BY position, created_at LIMIT 1"
             ).fetchone()
         if row is None:
             await asyncio.sleep(1.0)
@@ -866,15 +911,27 @@ def browse(path: str = ""):
 
 @app.get("/api/jobs")
 def list_jobs():
+    # Two blocks, because they answer different questions and want opposite
+    # orders: what is going to happen (queue order, all of it - truncating the
+    # thing you are about to reorder would be its own bug), then what already
+    # happened (newest first, capped).
     with _db() as conn:
-        rows = conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT 200").fetchall()
+        active = conn.execute(
+            "SELECT * FROM jobs WHERE status IN ('running','queued') "
+            "ORDER BY status <> 'running', position, created_at").fetchall()
+        history = conn.execute(
+            "SELECT * FROM jobs WHERE status NOT IN ('running','queued') "
+            "ORDER BY created_at DESC LIMIT 200").fetchall()
+    rows = list(active) + list(history)
 
     jobs = []
+    queue_index = 0
     for r in rows:
         job = dict(r)
         job["progress"] = None
         job["eta_sec"] = None
         job["eta_estimated"] = False
+        job["queue_index"] = None
 
         if job["status"] == "running":
             progress = _job_progress.get(job["id"])
@@ -883,6 +940,8 @@ def list_jobs():
             job["eta_sec"] = eta[0]
             job["eta_estimated"] = eta[1]
         elif job["status"] == "queued":
+            queue_index += 1
+            job["queue_index"] = queue_index
             job["eta_sec"] = _estimate_seconds(r)
             job["eta_estimated"] = job["eta_sec"] is not None
         jobs.append(job)
@@ -894,12 +953,13 @@ def list_jobs():
 def queue_eta():
     """Total time left: the running job's own ETA plus estimates for the rest.
 
-    Queue order is by created_at (same as _worker_loop), so the numbers line up
-    with the order things will actually run in.
+    Sorted by position (same as _worker_loop), so the numbers line up with the
+    order things will actually run in.
     """
     with _db() as conn:
         rows = conn.execute(
-            "SELECT * FROM jobs WHERE status IN ('running','queued') ORDER BY created_at"
+            "SELECT * FROM jobs WHERE status IN ('running','queued') "
+            "ORDER BY status <> 'running', position, created_at"
         ).fetchall()
 
     total = 0.0
@@ -947,13 +1007,95 @@ def create_job(job: JobCreate):
     job_id = str(uuid.uuid4())
     with _db() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, params_json, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)",
+            "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, params_json, status, created_at, position) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
             (job_id, job.mode, job.input_path, int(job.recursive), job.stereo_format,
-             json.dumps(job.params), _now()),
+             json.dumps(job.params), _now(), _next_position(conn)),
         )
+        # Previews jump the queue. The whole point of a preview is to see the
+        # settings before committing the hours a full conversion costs - behind
+        # a queue that is days deep it would answer the question long after the
+        # question stopped mattering.
+        #
+        # This is now an insertion rule rather than a sort rule, and that is the
+        # point: the queue has exactly one order, the one on screen. A preview
+        # lands in front, and from then on it can be dragged like any other row
+        # instead of being pinned there by a sort key nobody can see.
+        if job.mode == "preview":
+            modes = {r["id"]: r["mode"] for r in
+                      conn.execute("SELECT id, mode FROM jobs WHERE status='queued'")}
+            ids = [i for i in _queued_ids(conn) if i != job_id]
+            at = 0
+            while at < len(ids) and modes.get(ids[at]) == "preview":
+                at += 1
+            ids.insert(at, job_id)
+            _apply_queue_order(conn, ids)
         conn.commit()
     return {"id": job_id}
+
+
+class QueueOrder(BaseModel):
+    order: list[str]
+
+
+@app.post("/api/queue/reorder")
+def reorder_queue(body: QueueOrder):
+    """Apply a client-supplied queue order (the drag-and-drop endpoint).
+
+    A merge, not an assignment. The order the browser sends is the order it was
+    *showing*, which is up to a refresh interval stale: jobs may have started,
+    finished, been canceled or been added since. So ids the server no longer
+    has queued are dropped, and queued ids the client never saw keep their
+    relative order behind the ones it did. Dragging one row can then never
+    resurrect, reorder or lose a job the user could not see.
+    """
+    with _db() as conn:
+        current = _queued_ids(conn)
+        known = set(current)
+        seen = set()
+        wanted = []
+        for job_id in body.order:
+            if job_id in known and job_id not in seen:
+                seen.add(job_id)
+                wanted.append(job_id)
+        rest = [i for i in current if i not in seen]
+        _apply_queue_order(conn, wanted + rest)
+        conn.commit()
+        return {"order": _queued_ids(conn)}
+
+
+class JobMove(BaseModel):
+    to: str  # "top" | "bottom" | "up" | "down"
+
+
+@app.post("/api/jobs/{job_id}/move")
+def move_job(job_id: str, body: JobMove):
+    """Move one job within the queue.
+
+    Dragging is fine over a screenful. Over a queue a hundred deep, "run this
+    next" is a button, not an exercise in scrolling while holding the mouse
+    down - which is the case this whole feature exists for.
+    """
+    with _db() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "not found")
+        if row["status"] != "queued":
+            # The running job is already on the GPU and nothing here interrupts
+            # it; a finished one is not in the queue to begin with.
+            raise HTTPException(409, f"only a queued job can be moved (this one is {row['status']})")
+        ids = _queued_ids(conn)
+        at = ids.index(job_id)
+        ids.pop(at)
+        targets = {"top": 0, "bottom": len(ids),
+                    "up": max(0, at - 1), "down": min(len(ids), at + 1)}
+        if body.to not in targets:
+            raise HTTPException(400, "to must be one of: top, bottom, up, down")
+        at = targets[body.to]
+        ids.insert(at, job_id)
+        _apply_queue_order(conn, ids)
+        conn.commit()
+        return {"position": at + 1, "queued": len(ids)}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
