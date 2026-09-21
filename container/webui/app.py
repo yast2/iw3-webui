@@ -50,6 +50,28 @@ PREVIEW_CLIP_SECONDS = float(os.environ.get("PREVIEW_CLIP_SECONDS", "120"))
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
 # ---------------------------------------------------------------------------
+# The multi-stage pipeline
+#
+# Everything above queues one `python -m iw3` process per job. The better
+# quality levels are not one process: they run a depth model over extracted
+# frames, post-process the depth maps, warp from the result and encode - five
+# or six programs, each reading what the previous one wrote.
+#
+# Rebuilding that inside this file would mean owning a frame store, a
+# per-stage resume and a temp-space policy, all of which the pipeline script
+# already owns. So the script stays the unit of work and this app stays a
+# queue: it execs the script with a level name and parses its stage markers.
+# That also keeps the two testable apart - the script can be run by hand.
+#
+# The script is NOT part of this repository (it is machine-specific and much
+# larger than a web UI has any business carrying). If it is not installed,
+# the levels that need it are offered but disabled, with the reason shown,
+# rather than silently missing.
+# ---------------------------------------------------------------------------
+CHAIN_SCRIPT = Path(os.environ.get("IW3_CHAIN_SCRIPT", "/opt/iw3-chain/run_chain.sh"))
+CHAIN_WORK_ROOT = Path(os.environ.get("IW3_CHAIN_WORK", str(OUTPUT_ROOT / "_chain")))
+
+# ---------------------------------------------------------------------------
 # Which device to convert on
 #
 # There is no vendor-specific code here and there does not need to be: nunif
@@ -135,6 +157,14 @@ SETTINGS_SCHEMA = [
            help="0-2 is reasonable. Higher = more pop, more eye strain."),
     _field("convergence", "Convergence (screen plane)", "float", min=0, max=1, step=0.05,
            help="0-1 reasonable. 0.5 pulls part of the scene in front of the screen."),
+    # Exposed because it is not a detail: `constant` nails the screen plane to
+    # the middle of the depth range, `sod_v1` looks for it per frame. Measured
+    # side by side on the same clip, `constant` left two to three times as much
+    # of the scene in front of the screen and carried a slow drift that
+    # `sod_v1` does not have, at no difference in runtime.
+    _field("convergence_mode", "Convergence mode", "select",
+           help="sod_v1 finds the screen plane per frame; constant fixes it in "
+                "the middle of the depth range."),
     _field("foreground_scale", "Foreground scale", "float", min=-3, max=3, step=0.1,
            help="0 disabled. Source: iw3 argparse Range(-3.0, 3.0)."),
     _field("edge_dilation", "Edge dilation (x, y)", "int_pair", default=[2, 1]),
@@ -164,6 +194,174 @@ STEREO_FORMATS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Quality levels
+#
+# Twelve free-form settings are the right thing for somebody who knows what
+# each of them does and the wrong thing for the ordinary question, which is
+# "good, or fast?". The levels below are three answers to that question, each
+# one a parameter set that was actually measured rather than assembled from
+# plausible-looking defaults.
+#
+# Every level therefore carries its own runtime model, and the UI turns that
+# into a time for the video in front of the user instead of quoting the hours
+# the measurement took. Two rules for what goes in `costs`:
+#
+#   * `fixed_sec` is per job, `sec_per_frame` scales with the frames actually
+#     processed. Both come from the same two-point measurements the queue's
+#     other estimates use (see "Estimating queued jobs" below).
+#   * `gpu` and `cpu` are added. For a single `iw3` process the encode hides
+#     behind the conversion and `cpu` is 0 - the measured wall clock is
+#     already in `gpu`. For the pipeline the stages run one after another, so
+#     the CPU-bound stage is time the user waits.
+#
+# Measured on an Intel Arc Pro B60 over 21,606 frames of 1920x1080 video
+# (12 min at 29.97 fps), each figure from a run of the full length rather than
+# extrapolated from a short clip. `notes` names what each number is, because
+# a level that quotes a GPU lower bound and a level that quotes a measured
+# wall clock are not the same kind of promise.
+# ---------------------------------------------------------------------------
+MEASURED_ON_FRAMES = 21606
+
+# Depth estimation at 4K costs more per frame than at HD, and not by the
+# pixel ratio: this installation's own VDA_B medians are 6.56 fps at HD
+# against 2.58 at 4K, a factor of 2.54, where the pixels alone would say 4.
+# So the levels are seeded at HD and scaled by the factor this machine
+# measured - flagged as an extrapolation wherever it is used, because no
+# level has been run end to end on a 4K source.
+RESOLUTION_FACTOR_4K = 6.56 / 2.58
+
+QUALITY_LEVELS = [
+    {
+        "id": "fast",
+        "label": "Fast",
+        "chain": False,
+        "costs": {"fixed_sec": 50.0, "gpu": 0.1577, "cpu": 0.0},
+        "cost_sentence": "Coarsest outlines - 39% less relief on silhouettes than "
+                         "the slower levels, and about half the fine detail - but "
+                         "the steadiest over time and by far the cheapest.",
+        "notes": "Measured wall clock including the x265 encode: 57 min 37 s for "
+                 "21,606 frames, cold and warm runs 0.6% apart.",
+        # One iw3 process, so the level is fully expressible as a parameter set
+        # and is stored as one: the job record then says exactly what ran.
+        #
+        # Two of these values are corrections rather than copies of what this
+        # UI shipped with. --divergence 1.376 instead of 2.0: measured on the
+        # finished side-by-side output, 2.0 carried 35.3 px of disparity where
+        # every other recipe carried 24.6-25.0 px, +42%, and 24.6 px is the
+        # span the 1.376 was derived against in the first place. And
+        # --convergence-mode sod_v1 instead of iw3's `constant`: better in all
+        # twelve frequency bands across three image regions, at no cost in
+        # runtime and no change to the depth map.
+        "params": {
+            "depth_model": "VDA_B",
+            "divergence": 1.376,
+            "convergence": 0.5,
+            "convergence_mode": "sod_v1",
+            "foreground_scale": 0,
+            "edge_dilation": [2, 1],
+            "video_codec": "libx265",
+            "pix_fmt": "yuv420p",
+            "max_fps": 1000,
+            "scene_detect": True,
+            "ema_normalize": True,
+            "ema_decay": 0.75,
+            "ema_buffer": 30,
+        },
+    },
+    {
+        "id": "economical",
+        "label": "Economical",
+        "chain": True,
+        "costs": {"fixed_sec": 35.0, "gpu": 0.3860, "cpu": 0.1611},
+        "cost_sentence": "Softer outlines than Standard - 8% less relief on "
+                         "silhouettes, and noticeably less fine structure - for "
+                         "roughly three quarters of the time.",
+        "notes": "GPU lower bound 2 h 19 plus a measured 58 min of CPU-bound "
+                 "post-processing, over 21,606 frames.",
+    },
+    {
+        "id": "standard",
+        "label": "Standard",
+        "chain": True,
+        "default": True,
+        "costs": {"fixed_sec": 54.0, "gpu": 0.5776, "cpu": 0.1389},
+        "cost_sentence": "Keeps the full fine structure of the depth model and "
+                         "slightly sharper silhouettes than Fast; the most "
+                         "expensive level that is not optional extras.",
+        "notes": "GPU lower bound 3 h 28 plus a measured 50 min of CPU-bound "
+                 "post-processing, over 21,606 frames.",
+    },
+    {
+        "id": "custom",
+        "label": "Custom (all settings)",
+        "chain": False,
+        "costs": None,  # estimated from this machine's finished jobs instead
+        "cost_sentence": "Every iw3 setting, exactly as this UI has always "
+                         "offered them. Time estimated from finished jobs on "
+                         "this machine, per depth model.",
+        "notes": None,
+    },
+]
+
+# Two switches rather than two more levels: they are the same recipes with one
+# extra stage, they multiply with the levels, and both are off by default
+# because in side-by-side viewing neither was clearly worth its hours.
+QUALITY_OPTIONS = [
+    {
+        "id": "flow",
+        "label": "Optical flow smoothing",
+        "chain_only": True,
+        "costs": {"fixed_sec": 0.0, "gpu": 0.1777, "cpu": 0.0},
+        "cost_sentence": "Less flicker on still surfaces (-10% measured). Viewed "
+                         "side by side the difference was at the edge of being "
+                         "visible at all; some scenes may need it.",
+        "notes": "Measured 1 h 04 over 21,606 frames.",
+    },
+    {
+        "id": "upscale",
+        "label": "Denoise and 2x upscale before the warp",
+        "chain_only": True,
+        "costs": {"fixed_sec": 0.0, "gpu": 0.8700, "cpu": 0.0},
+        "cost_sentence": "Removes compression artefacts, but adds no detail the "
+                         "source did not carry: against an 8 Mbit/s source the "
+                         "entire gain sat above what the source could hold.",
+        "notes": "Measured 0.870 s/frame = 5 h 13 over 21,606 frames, for the "
+                 "upscaling stage alone. The warp then works on four times the "
+                 "pixels, which has not been measured.",
+    },
+]
+
+QUALITY_BY_ID = {lv["id"]: lv for lv in QUALITY_LEVELS}
+OPTION_BY_ID = {op["id"]: op for op in QUALITY_OPTIONS}
+DEFAULT_QUALITY = next(lv["id"] for lv in QUALITY_LEVELS if lv.get("default"))
+
+
+def _chain_available():
+    """Whether the multi-stage pipeline script is installed and executable."""
+    return CHAIN_SCRIPT.is_file() and os.access(CHAIN_SCRIPT, os.X_OK)
+
+
+def _level_seconds(level_id, frames, bucket, flow=False, upscale=False):
+    """Estimated wall clock for `frames` at this level, or None if unmodelled.
+
+    `bucket` is 'hd' or '4k'; see RESOLUTION_FACTOR_4K for what the 4K case is
+    worth. Returns (seconds, extrapolated).
+    """
+    level = QUALITY_BY_ID.get(level_id)
+    if not level or not level.get("costs") or not frames:
+        return None, False
+    parts = [level["costs"]]
+    if level["chain"]:
+        if flow:
+            parts.append(OPTION_BY_ID["flow"]["costs"])
+        if upscale:
+            parts.append(OPTION_BY_ID["upscale"]["costs"])
+    seconds = sum(p["fixed_sec"] + frames * (p["gpu"] + p["cpu"]) for p in parts)
+    if bucket == "4k":
+        return seconds * RESOLUTION_FACTOR_4K, True
+    return seconds, False
+
+# ---------------------------------------------------------------------------
 # Job store (SQLite under $NUNIF_HOME so the queue survives container restarts)
 # ---------------------------------------------------------------------------
 _db_lock = asyncio.Lock()
@@ -190,7 +388,10 @@ def _init_db():
                 started_at TEXT,
                 finished_at TEXT,
                 error TEXT,
-                position INTEGER NOT NULL DEFAULT 0
+                position INTEGER NOT NULL DEFAULT 0,
+                quality TEXT NOT NULL DEFAULT 'custom',
+                opt_flow INTEGER NOT NULL DEFAULT 0,
+                opt_upscale INTEGER NOT NULL DEFAULT 0
             )
         """)
         # Queue order used to be created_at, which made "run this one next" a
@@ -199,6 +400,15 @@ def _init_db():
         # produced, so a queue that is days deep keeps running in exactly the
         # order it had when the upgrade landed.
         columns = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+        # Quality levels arrived after the queue did. Rows written before them
+        # carry a hand-picked parameter set, which is exactly what 'custom'
+        # means - so the default backfills them correctly and their ETAs keep
+        # coming from the same measured-throughput path as before.
+        for name, decl in (("quality", "TEXT NOT NULL DEFAULT 'custom'"),
+                           ("opt_flow", "INTEGER NOT NULL DEFAULT 0"),
+                           ("opt_upscale", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
         if "position" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
             seed = conn.execute(
@@ -321,6 +531,47 @@ def _rate_to_fps(value: str, unit: str):
     return rate
 
 
+# The pipeline announces each stage on its own line before starting it:
+#
+#     === 2/6 depth estimation  2026-09-21 15:04:11
+#
+# which is the one thing a stage runner has to say to be watchable from the
+# outside. The stages themselves are ordinary iw3/torch programs and draw the
+# same tqdm bars as a single-process job, so the bar below is the *stage's*
+# progress and is labelled as such - a chain has no honest single percentage
+# to report, because its stages are nothing like equally long.
+_CHAIN_STAGE = re.compile(
+    r"^===\s*(?P<stage>\d+)\s*/\s*(?P<stages>\d+)\s+(?P<label>.+?)"
+    r"(?:\s\s+\d{4}-\d\d-\d\d[ T][\d:]+)?\s*$")
+
+
+def _parse_chain_stage(text: str):
+    m = _CHAIN_STAGE.match(text.strip("\r\n"))
+    if not m:
+        return None
+    return {
+        "phase": "chain",
+        "stage": int(m.group("stage")),
+        "stages": int(m.group("stages")),
+        "stage_label": m.group("label").strip(),
+        "percent": None, "frames": None, "total_frames": None,
+        "elapsed_sec": None, "eta_sec": None, "rate_fps": None,
+    }
+
+
+def _merge_chain_progress(previous, parsed):
+    """Keep the stage a chain is in while its inner tqdm bar moves on."""
+    if not previous or previous.get("phase") != "chain":
+        return parsed
+    merged = dict(previous)
+    for key in ("percent", "frames", "total_frames", "elapsed_sec", "rate_fps"):
+        merged[key] = parsed.get(key)
+    # tqdm's remaining-time describes the current stage, never the chain. The
+    # job's ETA comes from the level's runtime model instead (_running_eta).
+    merged["eta_sec"] = None
+    return merged
+
+
 def _parse_progress(text: str):
     m = _TQDM_BOUNDED.search(text)
     if m:
@@ -404,6 +655,11 @@ def _job_rate(row):
         # a folder job is many files under one timestamp: neither is a clean
         # measurement of one file's throughput.
         return None
+    if QUALITY_BY_ID.get(row["quality"], {}).get("chain"):
+        # A pipeline job's elapsed time covers five programs, only one of
+        # which is the depth model this table is keyed on. Counting it here
+        # would make every single-process estimate several times too slow.
+        return None
     if not row["started_at"] or not row["finished_at"]:
         return None
     try:
@@ -465,7 +721,22 @@ def _running_eta(job_row, progress):
     """
     if progress and progress.get("phase") == "convert" and progress.get("eta_sec") is not None:
         return progress["eta_sec"], False
-    return _estimate_seconds(job_row), True
+    total = _estimate_seconds(job_row)
+    if total is None:
+        return None, True
+    # An estimate is a total, and a running job wants what is *left*. For the
+    # scene-detection pre-pass the difference is seconds; for a pipeline job,
+    # whose stages each draw a bar that knows nothing about the other stages,
+    # the fallback lasts the whole job - and an ETA that stands still for four
+    # hours is worse than no ETA at all.
+    if job_row["started_at"]:
+        try:
+            elapsed = (datetime.now(timezone.utc)
+                       - datetime.fromisoformat(job_row["started_at"])).total_seconds()
+        except ValueError:
+            elapsed = 0.0
+        total = max(0.0, total - elapsed)
+    return total, True
 
 
 _probe_cache: dict[tuple, dict] = {}
@@ -509,8 +780,14 @@ def _estimate_seconds(job_row):
         return None
 
     params = json.loads(job_row["params_json"])
-    max_fps = params.get("max_fps") or _defaults.get("max_fps") or 30
-    effective_fps = min(info["fps"], float(max_fps))
+    level = QUALITY_BY_ID.get(job_row["quality"], {})
+    # The pipeline extracts every frame of the source; max_fps is an iw3
+    # argument and the pipeline is not one iw3 call.
+    if level.get("chain"):
+        effective_fps = info["fps"]
+    else:
+        max_fps = params.get("max_fps") or _defaults.get("max_fps") or 30
+        effective_fps = min(info["fps"], float(max_fps))
     # A preview only ever converts the extracted clip, so the source length
     # beyond it costs nothing. Cutting the clip itself is a stream copy of a
     # few seconds and is not worth modelling.
@@ -520,6 +797,15 @@ def _estimate_seconds(job_row):
     frames = duration * effective_fps
 
     bucket = _bucket(info.get("height"))
+    # A level with a runtime model of its own is estimated from that model:
+    # it was measured as a whole recipe, which is a better description of it
+    # than a per-depth-model rate could be.
+    if level.get("costs"):
+        seconds, _ = _level_seconds(job_row["quality"], frames, bucket,
+                                    flow=bool(job_row["opt_flow"]),
+                                    upscale=bool(job_row["opt_upscale"]))
+        if seconds is not None:
+            return seconds
     model = params.get("depth_model") or _defaults.get("depth_model")
     rate = (_throughput().get((model, bucket))
             or SEED_THROUGHPUT_FPS.get((model, bucket))
@@ -538,7 +824,45 @@ def _preview_window(duration_sec, clip_sec):
     return (duration_sec - clip_sec) / 2.0, clip_sec
 
 
+def _chain_work_dir(job_id) -> Path:
+    return CHAIN_WORK_ROOT / job_id
+
+
+def _build_chain_argv(job_row, input_path=None, out_dir=None):
+    """The pipeline call for a multi-stage level.
+
+    Contract with the script, kept deliberately small - one level name, one
+    input, one output directory, one scratch directory, and a switch per
+    option. Everything about *how* a level is produced stays in the script;
+    this app only ever picks a level and waits.
+    """
+    if input_path is None:
+        input_path = INPUT_ROOT / job_row["input_path"]
+    if out_dir is None:
+        out_dir = _preview_dir(job_row["id"]) if job_row["mode"] == "preview" else OUTPUT_ROOT
+    out_dir.mkdir(parents=True, exist_ok=True)
+    work = _chain_work_dir(job_row["id"])
+    work.mkdir(parents=True, exist_ok=True)
+
+    argv = [str(CHAIN_SCRIPT),
+            "--level", job_row["quality"],
+            "-i", str(input_path),
+            "-o", str(out_dir),
+            "--work", str(work),
+            "--gpu", IW3_GPU]
+    if job_row["opt_flow"]:
+        argv.append("--flow")
+    if job_row["opt_upscale"]:
+        argv.append("--upscale")
+    fmt = next((s for s in STEREO_FORMATS if s["value"] == job_row["stereo_format"]),
+               STEREO_FORMATS[0])
+    argv += ["--stereo-format", fmt["value"]]
+    return argv
+
+
 def _build_argv(job_row, input_path=None, out_dir=None):
+    if QUALITY_BY_ID.get(job_row["quality"], {}).get("chain"):
+        return _build_chain_argv(job_row, input_path=input_path, out_dir=out_dir)
     params = json.loads(job_row["params_json"])
     if input_path is None:
         input_path = INPUT_ROOT / job_row["input_path"]
@@ -664,6 +988,7 @@ async def _run_job(job_id):
         return
 
     log_path = LOG_DIR / f"{job_id}.log"
+    is_chain = bool(QUALITY_BY_ID.get(row["quality"], {}).get("chain"))
 
     with _db() as conn:
         conn.execute("UPDATE jobs SET status='running', started_at=? WHERE id=?", (_now(), job_id))
@@ -735,9 +1060,19 @@ async def _run_job(job_id):
                     # Parse before the throttle: the log only needs ~2 ticks a
                     # second, but the progress bar should reflect the newest
                     # tick we have actually seen.
-                    parsed = _parse_progress(text)
-                    if parsed:
-                        _job_progress[job_id] = parsed
+                    if is_chain:
+                        stage = _parse_chain_stage(text)
+                        if stage:
+                            _job_progress[job_id] = stage
+                        else:
+                            parsed = _parse_progress(text)
+                            if parsed:
+                                _job_progress[job_id] = _merge_chain_progress(
+                                    _job_progress.get(job_id), parsed)
+                    else:
+                        parsed = _parse_progress(text)
+                        if parsed:
+                            _job_progress[job_id] = parsed
                     now = time.monotonic()
                     if is_progress and now - last_progress_flush < PROGRESS_THROTTLE_SEC:
                         continue
@@ -755,6 +1090,14 @@ async def _run_job(job_id):
             _job_progress.pop(job_id, None)
 
     status = "done" if returncode == 0 else "failed"
+    if is_chain:
+        work = _chain_work_dir(job_id)
+        if status == "done":
+            # Tens of thousands of extracted frames and as many depth maps -
+            # keeping them would fill the output volume within a few jobs.
+            shutil.rmtree(work, ignore_errors=True)
+        elif work.exists():
+            await _publish_log(job_id, f"[pipeline] scratch kept for inspection: {work}\n")
     if clip_path is not None:
         if status == "done":
             # The clip is an intermediate, reproducible in seconds. Only the
@@ -820,7 +1163,13 @@ class JobCreate(BaseModel):
     input_path: str  # relative to /input
     recursive: bool = False
     stereo_format: str = "full_sbs"
-    params: dict
+    quality: str = "custom"
+    flow: bool = False
+    upscale: bool = False
+    # Only 'custom' reads these. A level is a measured recipe; letting a form
+    # field through would make the name on the job a claim about a run that
+    # never happened.
+    params: dict = {}
 
 
 def _safe_input_path(rel_path: str) -> Path:
@@ -833,6 +1182,84 @@ def _safe_input_path(rel_path: str) -> Path:
 @app.get("/api/schema")
 def get_schema():
     return {"fields": SETTINGS_SCHEMA, "stereo_formats": STEREO_FORMATS}
+
+
+def _level_public(level, available):
+    out = {k: level[k] for k in ("id", "label", "chain", "cost_sentence", "notes")}
+    out["available"] = True if not level["chain"] else available
+    out["unavailable_reason"] = None if out["available"] else (
+        f"needs the multi-stage pipeline script ({CHAIN_SCRIPT}), which is not "
+        f"installed in this container")
+    out["settings_form"] = not level.get("params") and not level["chain"]
+    out["default"] = bool(level.get("default"))
+    return out
+
+
+@app.get("/api/quality")
+def quality():
+    """The levels, their switches, and what each one honestly costs."""
+    available = _chain_available()
+    return {
+        "levels": [_level_public(lv, available) for lv in QUALITY_LEVELS],
+        "options": [{k: op[k] for k in ("id", "label", "chain_only",
+                                        "cost_sentence", "notes")}
+                    for op in QUALITY_OPTIONS],
+        "default": DEFAULT_QUALITY if available else "fast",
+        "chain_available": available,
+        "chain_script": str(CHAIN_SCRIPT),
+        "measured_on_frames": MEASURED_ON_FRAMES,
+    }
+
+
+@app.get("/api/estimate")
+def estimate(path: str = "", mode: str = "convert", flow: bool = False,
+             upscale: bool = False):
+    """How long each level would take *for this video*.
+
+    The measurements behind the levels were taken on one 12-minute file, and a
+    fixed "3 h 28" on a button would be wrong for every other length. So the
+    frame count of the selected source is what is quoted, and when nothing is
+    selected the numbers say plainly which file they belong to.
+    """
+    info = None
+    if path.strip():
+        info = _probe_video(_safe_input_path(path))
+    if info and info.get("duration_sec") and info.get("fps"):
+        duration = info["duration_sec"]
+        if mode == "preview":
+            duration = min(duration, PREVIEW_CLIP_SECONDS)
+        frames = duration * info["fps"]
+        bucket = _bucket(info.get("height"))
+        source = "selected file"
+    else:
+        # The reference the levels were measured on, so a first-time visitor
+        # still sees the shape of the ladder before picking a file.
+        frames = MEASURED_ON_FRAMES
+        bucket = "hd"
+        source = "reference measurement (12 min, 1080p)"
+
+    levels = {}
+    for lv in QUALITY_LEVELS:
+        seconds, extrapolated = _level_seconds(lv["id"], frames, bucket,
+                                               flow=flow, upscale=upscale)
+        levels[lv["id"]] = {
+            "seconds": round(seconds) if seconds else None,
+            "extrapolated": extrapolated,
+        }
+    options = {}
+    for op in QUALITY_OPTIONS:
+        c = op["costs"]
+        extra = c["fixed_sec"] + frames * (c["gpu"] + c["cpu"])
+        if bucket == "4k":
+            extra *= RESOLUTION_FACTOR_4K
+        options[op["id"]] = {"seconds": round(extra), "extrapolated": bucket == "4k"}
+    return {
+        "frames": round(frames),
+        "resolution_bucket": bucket,
+        "basis": source,
+        "levels": levels,
+        "options": options,
+    }
 
 
 @app.get("/api/health")
@@ -1004,13 +1431,37 @@ def create_job(job: JobCreate):
     if job.mode == "preview" and (job.recursive or target.is_dir()):
         raise HTTPException(400, "preview works on a single video file, not a folder")
 
+    level = QUALITY_BY_ID.get(job.quality)
+    if level is None:
+        raise HTTPException(400, f"unknown quality level: {job.quality}")
+    if level["chain"]:
+        if not _chain_available():
+            raise HTTPException(
+                400, f"quality level '{job.quality}' needs the multi-stage pipeline, "
+                     f"and {CHAIN_SCRIPT} is not installed or not executable. Set "
+                     f"IW3_CHAIN_SCRIPT, or pick a single-pass level.")
+        if job.recursive:
+            # The pipeline takes one video and one scratch directory. A folder
+            # of them is a queue's job, not a script's.
+            raise HTTPException(400, f"quality level '{job.quality}' converts one file "
+                                     f"at a time; queue the files individually")
+    elif job.flow or job.upscale:
+        raise HTTPException(400, "the flow and upscale options are stages of the "
+                                 "multi-stage pipeline; they do nothing on a "
+                                 "single-pass level")
+    # A named level *is* its parameter set, stored so the row keeps saying what
+    # ran even if the table above is later corrected.
+    params = dict(level["params"]) if level.get("params") else dict(job.params)
+
     job_id = str(uuid.uuid4())
     with _db() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, params_json, status, created_at, position) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
+            "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, params_json, "
+            "status, created_at, position, quality, opt_flow, opt_upscale) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)",
             (job_id, job.mode, job.input_path, int(job.recursive), job.stereo_format,
-             json.dumps(job.params), _now(), _next_position(conn)),
+             json.dumps(params), _now(), _next_position(conn),
+             job.quality, int(job.flow), int(job.upscale)),
         )
         # Previews jump the queue. The whole point of a preview is to see the
         # settings before committing the hours a full conversion costs - behind

@@ -68,6 +68,26 @@
   .banner { margin: 0 16px 12px; padding: 10px 14px; border-radius: 6px;
             background: #3a2e12; border: 1px solid var(--warn); color: #f0d9a8;
             font-size: 13px; line-height: 1.45; }
+  /* A level is picked by what it costs, so the time is part of the label and
+     not a tooltip: same line, same weight, right-aligned so the column of
+     hours can be compared at a glance. */
+  .level { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+           margin-bottom: 6px; cursor: pointer; display: block; }
+  .level:hover { background: #22262f; }
+  .level.checked { border-color: var(--accent); background: #1f2532; }
+  .level.disabled { opacity: .5; cursor: not-allowed; }
+  .level-head { display: flex; align-items: baseline; gap: 8px; }
+  .level-head input { width: auto; margin: 0; }
+  .level-head .name { font-weight: 600; }
+  .level-head .time { margin-left: auto; font-variant-numeric: tabular-nums;
+                      color: var(--accent); white-space: nowrap; }
+  .level-head .time.unknown { color: var(--muted); }
+  .level .help { margin-top: 4px; }
+  .option-row { display: flex; align-items: baseline; gap: 8px; margin: 8px 0 0; }
+  .option-row input { width: auto; }
+  .option-row .time { margin-left: auto; color: var(--muted);
+                      font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #estimateBasis { margin: 8px 0 4px; }
   td.eta { white-space: nowrap; font-variant-numeric: tabular-nums; }
   td.eta .approx { color: var(--muted); }
   #queueSummary { color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
@@ -94,6 +114,10 @@
 
   <div class="panel">
     <h2>2. Settings</h2>
+    <label>Quality level</label>
+    <div id="qualityLevels"></div>
+    <div id="qualityOptions"></div>
+    <div id="estimateBasis" class="help"></div>
     <label>Stereo format</label>
     <select id="stereoFormat"></select>
     <div id="settingsForm"></div>
@@ -109,7 +133,7 @@
   <div class="panel full">
     <h2>Job queue <span id="queueSummary"></span><span id="queueHint" class="help" style="float:right;text-transform:none;letter-spacing:0">drag a queued row to reorder &middot; &#10514; run next &middot; &#10515; run last</span></h2>
     <table>
-      <thead><tr><th title="Drag a queued row to reorder it">#</th><th>Created</th><th>Mode</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
+      <thead><tr><th title="Drag a queued row to reorder it">#</th><th>Created</th><th>Mode</th><th>Quality</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
       <tbody id="jobRows"></tbody>
     </table>
     <div id="log"></div>
@@ -167,9 +191,114 @@ async function loadBrowser(path) {
       selected = entry;
       document.getElementById("selectedPath").textContent = "/input/" + entry.path
         + (entry.type === "dir" ? "  (double-click to open, single-click selects the folder itself)" : "");
+      // The quality levels quote a time for *this* file, so they have to be
+      // recomputed the moment the file changes.
+      if (quality) refreshEstimates();
     };
     el.appendChild(row);
   }
+}
+
+// --- Quality levels -----------------------------------------------------
+// The levels are measured recipes; the switches are extra stages. What the UI
+// has to get right is the price tag: the measurements were taken on one
+// 12-minute file, so the server recomputes every figure for the frame count of
+// the selected source and the page shows which file it is quoting.
+let quality = null;          // /api/quality
+let currentLevel = "custom";
+
+function selectedOptions() {
+  return {
+    flow: document.getElementById("opt_flow")?.checked || false,
+    upscale: document.getElementById("opt_upscale")?.checked || false,
+  };
+}
+
+function renderQuality() {
+  currentLevel = quality.default;
+  const box = document.getElementById("qualityLevels");
+  box.innerHTML = "";
+  for (const lv of quality.levels) {
+    const el = document.createElement("label");
+    el.className = "level" + (lv.available ? "" : " disabled");
+    el.dataset.id = lv.id;
+    el.innerHTML = `
+      <span class="level-head">
+        <input type="radio" name="quality" value="${lv.id}"
+               ${lv.id === currentLevel ? "checked" : ""}
+               ${lv.available ? "" : "disabled"}>
+        <span class="name">${lv.label}</span>
+        <span class="time" id="t_${lv.id}">—</span>
+      </span>
+      <span class="help">${lv.available ? lv.cost_sentence : lv.unavailable_reason}</span>`;
+    el.querySelector("input").onchange = () => { currentLevel = lv.id; applyLevel(); };
+    box.appendChild(el);
+  }
+
+  const opts = document.getElementById("qualityOptions");
+  opts.innerHTML = quality.options.map(op => `
+    <div class="option-row" id="row_${op.id}">
+      <input type="checkbox" id="opt_${op.id}">
+      <label style="margin:0" for="opt_${op.id}">${op.label}</label>
+      <span class="time" id="t_opt_${op.id}">—</span>
+    </div>
+    <div class="help">${op.cost_sentence}</div>`).join("");
+  for (const op of quality.options) {
+    document.getElementById(`opt_${op.id}`).onchange = refreshEstimates;
+  }
+  applyLevel();
+}
+
+function applyLevel() {
+  const lv = quality.levels.find(l => l.id === currentLevel) || {};
+  for (const el of document.querySelectorAll(".level")) {
+    el.classList.toggle("checked", el.dataset.id === currentLevel);
+  }
+  // The twelve iw3 settings belong to the level that is defined by them.
+  // Under a named level they would look editable and be ignored.
+  document.getElementById("settingsForm").hidden = !lv.settings_form;
+  for (const op of quality.options) {
+    const row = document.getElementById(`row_${op.id}`);
+    const usable = !op.chain_only || lv.chain;
+    row.style.opacity = usable ? "1" : ".45";
+    const box = document.getElementById(`opt_${op.id}`);
+    box.disabled = !usable;
+    if (!usable) box.checked = false;
+  }
+  refreshEstimates();
+}
+
+async function refreshEstimates() {
+  const o = selectedOptions();
+  const q = new URLSearchParams({
+    path: (selected && selected.type === "file") ? selected.path : "",
+    flow: o.flow, upscale: o.upscale,
+  });
+  let est;
+  try { est = await api("/estimate?" + q.toString()); } catch (e) { return; }
+
+  for (const lv of quality.levels) {
+    const cell = document.getElementById(`t_${lv.id}`);
+    const v = est.levels[lv.id];
+    if (!v || v.seconds === null) {
+      cell.textContent = "not modelled";
+      cell.className = "time unknown";
+    } else {
+      cell.textContent = (v.extrapolated ? "≈ " : "~ ") + fmtDuration(v.seconds);
+      cell.className = "time";
+      cell.title = (v.extrapolated
+        ? "Extrapolated from HD measurements by this machine's own HD:4K rate ratio - no level has been measured on a 4K source. "
+        : "") + (lv.notes || "");
+    }
+  }
+  for (const op of quality.options) {
+    const cell = document.getElementById(`t_opt_${op.id}`);
+    cell.textContent = "+ " + fmtDuration(est.options[op.id].seconds);
+    cell.title = op.notes || "";
+  }
+  document.getElementById("estimateBasis").textContent =
+    `Times for ${est.frames.toLocaleString()} frames (${est.basis}` +
+    `${est.resolution_bucket === "4k" ? ", 4K - extrapolated" : ""}).`;
 }
 
 // --- Settings form ------------------------------------------------------
@@ -228,12 +357,19 @@ function collectParams() {
 // --- Job submission -------------------------------------------------
 async function submitJob(mode) {
   if (!selected) { alert("Select a file or folder first."); return; }
+  const lv = quality.levels.find(l => l.id === currentLevel) || {};
+  const o = selectedOptions();
   const body = {
     mode,
     input_path: selected.path,
     recursive: document.getElementById("recursive").checked,
     stereo_format: document.getElementById("stereoFormat").value,
-    params: collectParams(),
+    quality: currentLevel,
+    flow: o.flow,
+    upscale: o.upscale,
+    // A named level carries its own parameters; sending the form alongside
+    // would only invite the question of which one won.
+    params: lv.settings_form ? collectParams() : {},
   };
   try {
     await api("/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -261,6 +397,17 @@ function fmtDuration(sec) {
   return `${s}s`;
 }
 
+// The level a job ran at, plus its switches. Jobs from before the levels
+// existed carry 'custom', which is what they were.
+function qualityCell(j) {
+  const lv = quality?.levels.find(l => l.id === j.quality);
+  const bits = [];
+  if (j.opt_flow) bits.push("flow");
+  if (j.opt_upscale) bits.push("4K");
+  return (lv ? lv.label : (j.quality || "custom"))
+    + (bits.length ? ` <span class="help">+${bits.join(" +")}</span>` : "");
+}
+
 function progressCell(j) {
   if (j.status === "done") {
     return `<div class="bar"><span style="width:100%;background:var(--ok)"></span></div>`;
@@ -276,6 +423,18 @@ function progressCell(j) {
   if (p.phase === "extract") {
     return `<div class="bar indeterminate"><span></span></div>
             <div class="progress-meta">cutting preview clip…</div>`;
+  }
+  // A pipeline job is five or six programs of wildly different lengths, so
+  // there is no honest single percentage for the job. What there is: which
+  // stage it is in, and how far that stage has got.
+  if (p.phase === "chain") {
+    const bar = p.percent === null
+      ? `<div class="bar indeterminate"><span></span></div>`
+      : `<div class="bar"><span style="width:${p.percent}%"></span></div>`;
+    const parts = [`stage ${p.stage}/${p.stages}`, p.stage_label];
+    if (p.percent !== null) parts.push(`${p.percent}% of the stage`);
+    if (p.rate_fps) parts.push(`${p.rate_fps} fps`);
+    return `${bar}<div class="progress-meta">${parts.join(" · ")}</div>`;
   }
   // The scene-detection pre-pass draws its own bar. Show it, but never let it
   // read as conversion progress - it runs at ~700 fps and finishes in seconds.
@@ -410,6 +569,7 @@ async function refreshJobs() {
       <td class="pos">${pos}</td>
       <td>${created}</td>
       <td>${j.mode}</td>
+      <td>${qualityCell(j)}</td>
       <td title="${j.input_path}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.input_path}</td>
       <td>${j.stereo_format}</td>
       <td><span class="status status-${j.status}">${j.status}</span></td>
@@ -527,7 +687,9 @@ function showLog(jobId) {
 (async function init() {
   await loadHealth();
   schema = await api("/schema");
+  quality = await api("/quality");
   renderSettingsForm();
+  renderQuality();
   await loadBrowser("");
   initQueueDnd();
   await refreshJobs();

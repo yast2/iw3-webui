@@ -41,6 +41,10 @@ The extension needs the container. The container does not need the extension.
 - **Settings read from iw3 itself** — the form's fields, defaults and choices
   are introspected from iw3's own `create_parser()` at startup, so they cannot
   drift out of sync with the nunif version in the image.
+- **Quality levels with honest times** — three measured recipes instead of
+  twelve free-form settings, each showing what it costs *for the video you
+  selected* and what you give up for the price. See
+  [Quality levels](#quality-levels).
 
 ## Requirements
 
@@ -178,6 +182,57 @@ log says so. The clip is deleted once the preview finishes, and kept if it
 fails, so you can look at what iw3 choked on.
 
 Set `PREVIEW_CLIP_SECONDS` to change the length.
+
+## Quality levels
+
+The settings form is the full truth and a poor first question. The level picker
+asks the question people actually have — good, or fast? — and answers it with
+measured recipes rather than plausible defaults:
+
+| Level | What it is | Needs the pipeline |
+|---|---|---|
+| **Fast** | One `iw3` process: VDA_B with EMA normalisation, `row_flow` warp, `sod_v1` convergence, x265. The whole film in about an hour. | no |
+| **Economical** | Multi-stage: small DepthPro, VDA_B with EMA, depth-band recombination, `mlbw_l2` warp. | yes |
+| **Standard** | The same chain with full DepthPro. Keeps the depth model's fine structure. | yes |
+| **Custom** | Every iw3 setting, as before. | no |
+
+Two switches, both off by default, apply to the multi-stage levels: optical
+flow smoothing and denoise-plus-2×-upscale before the warp. Each states what it
+costs and what it buys; neither was clearly worth its hours in side-by-side
+viewing, which is why they are switches and not levels.
+
+Every figure shown is recomputed for the frame count of the selected source, so
+the picker never quotes the length of the file the measurements were taken on.
+The underlying numbers, and the caveats on each, come from `/api/quality`:
+
+```sh
+curl -s localhost:8790/api/quality
+curl -s 'localhost:8790/api/estimate?path=some/film.mkv'
+```
+
+### The multi-stage pipeline is not in this repository
+
+The chained levels run five or six programs per job — frame extraction, depth
+estimation, depth post-processing, warp, encode — and that pipeline is a
+separate, machine-specific script. This app execs it with a level name and
+parses its stage markers; it does not reimplement it.
+
+Point `IW3_CHAIN_SCRIPT` at an executable that accepts
+
+```
+--level <fast|economical|standard> -i <input file> -o <output dir>
+--work <scratch dir> --gpu <id> --stereo-format <name> [--flow] [--upscale]
+```
+
+exits non-zero on failure, and announces each stage on its own line as
+
+```
+=== 2/6 depth estimation  2026-09-21 15:04:11
+```
+
+Without it, the chained levels are shown disabled with the reason, and nothing
+else changes. The scratch directory is deleted after a successful job and kept
+after a failure.
 
 ## Estimates
 
