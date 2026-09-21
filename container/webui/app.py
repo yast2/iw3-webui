@@ -453,8 +453,10 @@ QUALITY_OPTIONS = [
         "label": "Denoise and 2x upscale before the warp",
         "chain_only": True,
         "costs": {"fixed_sec": 0.0, "gpu": 0.8700, "cpu": 0.0},
-        "uses": "A waifu2x denoise-and-double pass over every frame before the "
-                "depth model sees it.",
+        "uses": "A waifu2x denoise-and-double pass over the RGB frames before "
+                "the warp. The depth maps stay at source resolution - DepthPro "
+                "works at a fixed 1536x1536 internally, so there is no extra "
+                "depth detail to be had from upscaling them.",
         "pros": [
             "Genuinely removes compression artefacts - the top frequency band "
             "drops 15% against the source, which is the part of the picture an "
