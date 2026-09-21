@@ -100,9 +100,18 @@
   /* A level is picked by what it costs and what it gives up, so both are on
      the card. The disadvantages are set in the same size and weight as the
      advantages: a level whose drawbacks are in smaller type is being sold. */
+  /* The levels sit side by side, not stacked. Four detailed cards in a column
+     push the rest of the form off the screen; in a row the whole choice is
+     visible at once and no drawback has to be hidden to achieve it. Narrow
+     windows drop to fewer columns on their own. */
+  #qualityLevels {
+    display: grid; gap: var(--s2);
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    align-items: stretch;
+  }
   .level {
     display: block; position: relative; border: 1px solid var(--border);
-    border-radius: var(--r); padding: var(--s3) var(--s4); margin-bottom: var(--s3);
+    border-radius: var(--r); padding: var(--s3); margin: 0;
     cursor: pointer; background: var(--raised); transition: border-color .12s, background .12s;
   }
   .level::before {
@@ -113,7 +122,7 @@
   .level.checked { border-color: var(--accent); background: #1b2230; }
   .level.checked::before { background: var(--accent); }
   .level.disabled { opacity: .55; cursor: not-allowed; }
-  .level-head { display: flex; align-items: baseline; gap: var(--s2); }
+  .level-head { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
   .level-head input { width: auto; margin: 0; flex: none; accent-color: var(--accent); }
   .level-head .name { font-weight: 650; font-size: 15.5px; }
   .level-head .time {
