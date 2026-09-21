@@ -37,7 +37,8 @@ The extension needs the container. The container does not need the extension.
   machine — see [Estimates](#estimates).
 - **Live log streaming** over SSE, throttled so a multi-hour job doesn't take
   the browser tab down with it.
-- **2-minute preview** — see [Preview](#preview).
+- **One-minute preview**, on a window chosen by rule — see [Preview](#preview).
+- **Two previews in one file**, interleaved per eye — see [Comparing two previews](#comparing-two-previews-in-one-file).
 - **Settings read from iw3 itself** — the form's fields, defaults and choices
   are introspected from iw3's own `create_parser()` at startup, so they cannot
   drift out of sync with the nunif version in the image.
@@ -105,7 +106,7 @@ curl -s localhost:8790/api/health
 |---|---|
 | `/config` | `NUNIF_HOME`: model checkpoints, the job database, per-job logs |
 | `/input` | Your source videos. Mount read-only; the container never writes here. |
-| `/output` | Converted files, and `_previews/<job-id>/` for previews |
+| `/output` | Converted files, `_previews/<job-id>/` for previews, `_compare/<job-id>/` for comparison files |
 
 ### Model checkpoints
 
@@ -162,26 +163,89 @@ or resurrect a job by dragging one row.
 
 ## Preview
 
-The **Preview (2 min clip)** button cuts a two-minute clip from the *middle* of
-the source and converts that, with exactly the settings the real job would use.
+The **Preview one minute** button converts a one-minute window of the source
+with exactly the settings the real job would use.
 
-Two decisions worth explaining:
+Three decisions worth explaining:
 
 - **A clip, not stills.** This button used to pass iw3's `--keyframe` and
   produce a handful of images. Stills cannot answer the question a 3D preview
   exists to answer — whether depth stays stable while the picture moves.
   Flicker, and depth bleeding across a hard cut, only show up in motion.
-- **The middle, not the start.** Openings are titles, logos and fades often
-  enough to be unrepresentative of the film behind them.
+- **The most telling minute, not the middle.** The middle of a file is as
+  likely as anywhere else to be a minute in which nothing happens, and every
+  recipe looks fine on a static shot. The default window is instead chosen by
+  rule: the minute with the most frame-to-frame motion that also *contains a
+  cut*, positioned so the cut falls near its middle. A cut is the hardest
+  thing a depth model has to survive, and a preview that never crosses one has
+  not been asked the question. If the file has no cut at all, the
+  highest-motion minute is taken and the job log says so. Pick **Start at a
+  time I choose** to override it, which also skips the scan.
 
-The clip is produced by copying the video stream — no re-encode, so what you
-judge is the real source. Audio is transcoded to AAC because mp4 will not
-accept every audio codec that arrives in an mkv or wmv. If the video codec
-itself cannot go into mp4 (`wmv3`, for instance), the clip is re-encoded and the
-log says so. The clip is deleted once the preview finishes, and kept if it
-fails, so you can look at what iw3 choked on.
+  The scan is a 160×90 greyscale decode of the whole file — about 30 s per 12
+  minutes of video, against 5 to 25 minutes for the preview it is choosing.
 
-Set `PREVIEW_CLIP_SECONDS` to change the length.
+- **Lead frames, and they are not optional.** The pipeline runs 200 frames
+  *before* the window and 30 after it, and both are cut away again before you
+  see the file. The convergence estimator carries an exponential moving
+  average across frames, so a window started cold is not the same recipe as
+  the full run — it is a slightly different one, which is the one thing a
+  preview must not be. So a 60 s preview of a 29.97 fps source costs
+  200 + 1798 + 30 = 2,028 frames of 21,606, or 9.4%, and that is the figure
+  the level picker quotes.
+
+The clip handed to the conversion is produced by copying the video stream — no
+re-encode, so what you judge is the real source. Because a stream copy always
+starts at a keyframe, the clip begins a little before the window asked for;
+the exact difference is measured and taken off the front along with the lead.
+Audio is transcoded to AAC because mp4 will not accept every audio codec that
+arrives in an mkv or wmv. If the video codec itself cannot go into mp4
+(`wmv3`, for instance), the clip is re-encoded and the log says so. The clip is
+deleted once the preview finishes, and kept if it fails, so you can look at
+what iw3 choked on.
+
+The finished preview is named `…_LRF.mp4` and lands in `/output/_previews/<job-id>/`.
+
+`PREVIEW_SECONDS`, `PREVIEW_LEAD_FRAMES` and `PREVIEW_TAIL_FRAMES` change the
+three numbers above.
+
+## Comparing two previews in one file
+
+Two finished previews of the same window can be combined into a single file to
+watch in a headset. The **Compare** panel appears once there are two to
+compare.
+
+🔴 **The part a naive implementation gets wrong:** a preview is already
+side-by-side stereo. `3840x1080` is not a picture, it is *left eye | right
+eye*. Putting two of them next to each other produces
+
+```
+A-left  A-right  B-left  B-right
+```
+
+and a headset splits that down the middle, so it shows A's right eye to the
+left eye and B's left eye to the right eye — two different recipes, one per
+eye, at a disparity that means nothing. Both arrangements below are therefore
+built **per eye**: each source is cut into its two halves, the halves are
+labelled and combined, and only then are the two finished eyes put back
+together as one side-by-side frame.
+
+| Arrangement | Output | What it is for |
+|---|---|---|
+| **A / B / A** (default) | same geometry as the inputs, three times the length | The same window three times. Seeing the change twice, and in both directions, finds differences that sitting side by side does not. Nothing about the geometry changes, so nothing can misread it. |
+| **A above B** | `3840x2160`, each eye `1920x2160` | Both in view at once. Vertical rather than horizontal, so each keeps a full `1920x1080` picture and both sit centred — side by side within an eye would give each one half a picture in a 32:9 strip. ⚠️ Each eye is then 16:18; a player that assumes 16:9 per eye will stretch it. |
+
+The label bar is drawn into each eye separately, at identical coordinates and
+fully opaque. A label at a different position in the two eyes has a disparity
+of its own and floats in front of the picture; a translucent one lets the two
+eyes' differing pixels through and flickers.
+
+Comparisons do not queue behind conversions. They run on their own worker,
+because a comparison is two or three minutes of fixed-function video encoder —
+a different unit of the chip from the one a conversion occupies — and behind a
+four-hour job a tool for looking at two previews is worth nothing.
+
+The output is named `…_LRF.mp4` and lands in `/output/_compare/<job-id>/`.
 
 ## Quality levels
 
@@ -189,12 +253,16 @@ The settings form is the full truth and a poor first question. The level picker
 asks the question people actually have — good, or fast? — and answers it with
 measured recipes rather than plausible defaults:
 
-| Level | What it is | Needs the pipeline |
-|---|---|---|
-| **Fast** | One `iw3` process: VDA_B with EMA normalisation, `row_flow` warp, `sod_v1` convergence, x265. The whole film in about an hour. | no |
-| **Economical** | Multi-stage: small DepthPro, VDA_B with EMA, depth-band recombination, `mlbw_l2` warp. | yes |
-| **Standard** | The same chain with full DepthPro. Keeps the depth model's fine structure. | yes |
-| **Custom** | Every iw3 setting, as before. | no |
+| Level | What it uses | Gains | Costs | Pipeline |
+|---|---|---|---|---|
+| **Fast** | One `iw3` process: VDA_B with EMA normalisation, `row_flow` warp, `sod_v1` convergence, x265. | 58 min for a 12-minute film, and the calmest of the three over time (0.0382 px of flicker on still surfaces). | **39% less relief on silhouettes** and about half the fine detail. Takes neither switch. | no |
+| **Economical** | Reduced DepthPro_S for fine structure, VDA_B with EMA for the coarse band, band swap, `mlbw_l2` warp. | An hour faster than Standard, and within 8% of its silhouettes. | Softer outlines (−8.0%) and markedly less fine structure (0.8534 against 0.9988). | yes |
+| **Standard** | The same chain with DepthPro at full resolution. | Keeps the depth model's fine band intact (0.9988) and the sharpest silhouettes on offer. | 4 h 19 for a 12-minute film, four and a half times Fast. | yes |
+| **Custom** | Whatever you put in the form. | Reaches settings the levels fix. | Not a measured recipe; nothing about the result is promised. | no |
+
+Each level carries the full list in the UI, advantages and disadvantages in the
+same type — a level whose drawbacks are set smaller than its benefits is being
+sold rather than described.
 
 Two switches, both off by default, apply to the multi-stage levels: optical
 flow smoothing and denoise-plus-2×-upscale before the warp. Each states what it
@@ -263,8 +331,15 @@ Everything below is an environment variable on the container.
 | `PUID` / `PGID` | `99` / `100` | User/group the process drops to; owns the output files |
 | `UMASK` | `000` | umask for created files |
 | `IW3_GPU` | `auto` | `auto` detects the accelerator; `0`/`1` pick one explicitly, `-1` forces the CPU |
-| `PREVIEW_CLIP_SECONDS` | `120` | Length of the preview clip |
-| `FFMPEG_BIN` | `ffmpeg` | ffmpeg used for clip extraction |
+| `PREVIEW_SECONDS` | `60` | Length of the visible part of a preview |
+| `PREVIEW_LEAD_FRAMES` | `200` | Frames run before the window and then cut away — see [Preview](#preview) |
+| `PREVIEW_TAIL_FRAMES` | `30` | Frames run after the window and then cut away |
+| `FFMPEG_BIN` | `ffmpeg` | ffmpeg used for the motion scan and clip extraction |
+| `FFPROBE_BIN` | `ffprobe` | ffprobe used to locate keyframes and check produced files |
+| `QSV_FFMPEG` | `/usr/lib/jellyfin-ffmpeg/ffmpeg` | Build used for this app's own two re-encodes |
+| `QSV_DEVICE` | `/dev/dri/renderD128` | Render node for the hardware encoder |
+| `QSV_GLOBAL_QUALITY` | `17` | `-global_quality` for `hevc_qsv` |
+| `OUTPUT_UID` / `OUTPUT_GID` | `99` / `100` | Owner set on delivered files |
 | `NUNIF_HOME` | `/config` | Checkpoints, queue database, logs |
 
 Only one job runs at a time regardless. iw3 was not built to share a device

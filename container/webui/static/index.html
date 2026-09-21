@@ -2,140 +2,294 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>iw3 - 2D to 3D converter</title>
 <style>
+  /* One static page, no framework, nothing fetched from the network: this is a
+     LAN service and it has to come up when the LAN is all there is. Everything
+     below is plain CSS against the markup this file writes itself. */
   :root {
-    --bg: #14161a; --panel: #1c1f26; --border: #2a2e37; --text: #e4e6eb;
-    --muted: #8b909c; --accent: #4f8cff; --ok: #3ecf8e; --err: #ff5c5c; --warn: #e0a940;
+    --bg: #101216; --panel: #191c22; --raised: #21252e; --border: #2b3039;
+    --text: #e6e8ed; --muted: #949aa8; --faint: #6b7280;
+    --accent: #5b94ff; --accent-dim: #24304d;
+    --ok: #46d19a; --err: #ff6b6b; --warn: #e3ae4a;
+    --r: 10px; --r-sm: 6px;
+    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.22);
   }
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
-  header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
-  main { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg); color: var(--text); margin: 0;
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-variant-numeric: tabular-nums;
+  }
+  a { color: var(--accent); }
+
+  header {
+    padding: var(--s4) var(--s5); border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap;
+    background: var(--panel);
+  }
+  header h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+
+  main {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: var(--s5); padding: var(--s5); max-width: 1500px; margin: 0 auto;
+    align-items: start;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--r); padding: var(--s4) var(--s4) var(--s5);
+    box-shadow: var(--shadow);
+  }
+  .panel > h2 {
+    font-size: 12px; margin: 0 0 var(--s4); color: var(--muted);
+    text-transform: uppercase; letter-spacing: .08em; font-weight: 650;
+    display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap;
+  }
   .full { grid-column: 1 / -1; }
-  #browser { max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
-  .entry { padding: 6px 10px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
-  .entry:hover { background: #262a33; }
-  .entry.selected { background: #2c3550; }
-  .entry .icon { width: 16px; opacity: .7; }
-  #selectedPath { font-family: monospace; color: var(--accent); word-break: break-all; margin-top: 8px; min-height: 1.2em; }
-  label { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
-  input[type=number], input[type=text], select { width: 100%; background: #10131a; border: 1px solid var(--border); color: var(--text); padding: 6px 8px; border-radius: 4px; }
-  .row { display: flex; gap: 10px; }
+
+  /* --- forms ------------------------------------------------------------ */
+  label { display: block; margin: var(--s4) 0 var(--s1); color: var(--muted); font-size: 12px;
+          text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  input[type=number], input[type=text], select {
+    width: 100%; background: #0c0e13; border: 1px solid var(--border);
+    color: var(--text); padding: 9px 10px; border-radius: var(--r-sm);
+    font: inherit; font-size: 14px;
+  }
+  input:focus-visible, select:focus-visible, button:focus-visible, .level:focus-within {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .row { display: flex; gap: var(--s3); }
   .row > * { flex: 1; }
-  .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+  .checkbox-row { display: flex; align-items: center; gap: var(--s2); margin: var(--s3) 0; }
   .checkbox-row input { width: auto; }
-  .help { color: var(--muted); font-size: 11px; margin-top: 2px; }
-  button { background: var(--accent); color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
-  button:hover { filter: brightness(1.1); }
-  button.secondary { background: #333844; }
-  button.danger { background: var(--err); }
+  .checkbox-row label { margin: 0; text-transform: none; letter-spacing: 0;
+                        font-size: 14px; font-weight: 400; color: var(--text); }
+  .help { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin-top: var(--s1); }
+  .help strong { color: var(--text); font-weight: 600; }
+
+  button {
+    background: var(--accent); color: #fff; border: 1px solid transparent;
+    padding: 9px 16px; border-radius: var(--r-sm); cursor: pointer;
+    font: inherit; font-size: 14px; font-weight: 550; min-height: 38px;
+  }
+  button:hover:not(:disabled) { filter: brightness(1.12); }
+  button.secondary { background: var(--raised); border-color: var(--border); color: var(--text); }
+  button.danger { background: transparent; border-color: #5b3030; color: var(--err); }
   button:disabled { opacity: .4; cursor: not-allowed; }
-  .actions { display: flex; gap: 8px; margin-top: 16px; }
+  .actions { display: flex; gap: var(--s3); flex-wrap: wrap; }
+
+  /* --- file browser ----------------------------------------------------- */
+  #browser { max-height: 300px; overflow-y: auto; border: 1px solid var(--border);
+             border-radius: var(--r-sm); background: #0c0e13; }
+  .entry { padding: 8px 10px; cursor: pointer; display: flex; gap: var(--s2);
+           align-items: center; border-bottom: 1px solid #1a1d24; font-size: 14px; }
+  .entry:last-child { border-bottom: 0; }
+  .entry:hover { background: var(--raised); }
+  .entry.selected { background: var(--accent-dim); }
+  .entry .icon { width: 18px; opacity: .8; flex: none; }
+  #selectedPath { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                  font-size: 13px; color: var(--accent); word-break: break-all;
+                  margin-top: var(--s3); min-height: 1.4em; }
+
+  /* --- quality level cards ---------------------------------------------- */
+  /* A level is picked by what it costs and what it gives up, so both are on
+     the card. The disadvantages are set in the same size and weight as the
+     advantages: a level whose drawbacks are in smaller type is being sold. */
+  .level {
+    display: block; position: relative; border: 1px solid var(--border);
+    border-radius: var(--r); padding: var(--s3) var(--s4); margin-bottom: var(--s3);
+    cursor: pointer; background: var(--raised); transition: border-color .12s, background .12s;
+  }
+  .level::before {
+    content: ""; position: absolute; left: -1px; top: 12px; bottom: 12px; width: 3px;
+    border-radius: 3px; background: transparent;
+  }
+  .level:hover:not(.disabled) { border-color: #3b4252; }
+  .level.checked { border-color: var(--accent); background: #1b2230; }
+  .level.checked::before { background: var(--accent); }
+  .level.disabled { opacity: .55; cursor: not-allowed; }
+  .level-head { display: flex; align-items: baseline; gap: var(--s2); }
+  .level-head input { width: auto; margin: 0; flex: none; accent-color: var(--accent); }
+  .level-head .name { font-weight: 650; font-size: 15.5px; }
+  .level-head .time {
+    margin-left: auto; color: var(--accent); white-space: nowrap; font-weight: 600;
+  }
+  .level.checked .level-head .time { color: #8fb4ff; }
+  .level-head .time.unknown { color: var(--faint); font-weight: 400; }
+  .level .uses { margin-top: var(--s2); color: var(--text); font-size: 13.5px; }
+  .level .for { margin-top: var(--s1); color: var(--muted); font-size: 13px; }
+  .ledger { margin: var(--s3) 0 0; padding: 0; list-style: none; font-size: 13px; }
+  .ledger li { display: flex; gap: var(--s2); margin-top: var(--s1); line-height: 1.5; }
+  .ledger .mark { flex: none; width: 1em; font-weight: 700; }
+  .ledger .pro .mark { color: var(--ok); }
+  .ledger .con .mark { color: var(--err); }
+  .ledger li span:last-child { color: var(--muted); }
+  .level.checked .ledger li span:last-child { color: #c6cad4; }
+  .level .blocked { margin-top: var(--s2); color: var(--warn); font-size: 13px; }
+
+  .option {
+    border: 1px solid var(--border); border-radius: var(--r-sm);
+    padding: var(--s3) var(--s4); margin-bottom: var(--s2); background: var(--raised);
+  }
+  .option-head { display: flex; align-items: baseline; gap: var(--s2); }
+  .option-head input { width: auto; margin: 0; flex: none; accent-color: var(--accent); }
+  .option-head label { margin: 0; text-transform: none; letter-spacing: 0;
+                       font-size: 14px; font-weight: 600; color: var(--text); }
+  .option-head .time { margin-left: auto; color: var(--muted); white-space: nowrap; }
+  .option.off { opacity: .45; }
+  #estimateBasis { margin-top: var(--s3); padding-top: var(--s3);
+                   border-top: 1px solid var(--border); }
+
+  /* --- notices ---------------------------------------------------------- */
+  .banner { margin: 0 var(--s5) calc(-1 * var(--s2)); padding: 11px 15px; border-radius: var(--r);
+            background: #332913; border: 1px solid var(--warn); color: #f2ddb2;
+            font-size: 13.5px; line-height: 1.5; }
+  .banner + .banner { margin-top: var(--s3); }
+
+  /* --- job table -------------------------------------------------------- */
+  .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
-  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
-  .status { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
-  .status-queued { background: #333; color: var(--muted); }
-  .status-running { background: #2c3550; color: var(--accent); }
-  .status-done { background: #163d2c; color: var(--ok); }
-  .status-failed { background: #3d1f1f; color: var(--err); }
-  .status-canceled { background: #333; color: var(--muted); }
-  .job-actions button { padding: 3px 8px; font-size: 11px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+  th { color: var(--muted); font-weight: 600; font-size: 11px;
+       text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
+  tbody tr:hover td { background: #1d212a; }
+  .status { padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 650;
+            white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .status-queued { background: #262a33; color: var(--muted); }
+  .status-running { background: var(--accent-dim); color: #8fb4ff; }
+  .status-running::before { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+  .status-done { background: #14382a; color: var(--ok); }
+  .status-failed { background: #3a1d1d; color: var(--err); }
+  .status-canceled { background: #262a33; color: var(--faint); }
+  .job-actions { white-space: nowrap; }
+  .job-actions button { padding: 4px 9px; font-size: 12px; min-height: 30px; }
   /* Queue order is edited in place, so the rows have to look draggable before
      anyone tries it: a grip, a grab cursor, and a gap where the row will land. */
   tr.queued-row { cursor: grab; }
   tr.queued-row.dragging { opacity: .4; cursor: grabbing; }
-  tr.queued-row.dragging td { background: #2c3550; }
-  td.pos { white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums;
-           width: 1%; user-select: none; }
-  td.pos .grip { color: #555b68; margin-right: 6px; letter-spacing: -1px; }
+  tr.queued-row.dragging td { background: var(--accent-dim); }
+  td.pos { white-space: nowrap; color: var(--muted); width: 1%; user-select: none; }
+  td.pos .grip { color: #4b515e; margin-right: 6px; letter-spacing: -1px; }
   tr.queued-row:hover td.pos .grip { color: var(--accent); }
-  td.pos .next { color: var(--accent); font-weight: 600; }
-  .move button { padding: 2px 6px; font-size: 11px; line-height: 1; background: #333844; }
-  .bar { position: relative; height: 6px; background: #10131a; border: 1px solid var(--border); border-radius: 3px; overflow: hidden; min-width: 130px; }
-  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+  td.pos .next { color: var(--accent); font-weight: 650; }
+  .move button { padding: 3px 7px; font-size: 12px; min-height: 30px; }
+  .bar { position: relative; height: 7px; background: #0c0e13; border: 1px solid var(--border);
+         border-radius: 4px; overflow: hidden; min-width: 130px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
   /* The scene-detection pre-pass reports no total, so there is no honest
      percentage to draw - show motion instead of a made-up width. */
   .bar.indeterminate > span { width: 35%; animation: slide 1.4s ease-in-out infinite; }
   @keyframes slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
-  .progress-meta { color: var(--muted); font-size: 11px; margin-top: 4px; white-space: nowrap; }
-  /* Running on the CPU is a legitimate state, not an error - but it is fifty
-     times slower, so it must not be something you have to go looking for. */
-  .banner { margin: 0 16px 12px; padding: 10px 14px; border-radius: 6px;
-            background: #3a2e12; border: 1px solid var(--warn); color: #f0d9a8;
-            font-size: 13px; line-height: 1.45; }
-  /* A level is picked by what it costs, so the time is part of the label and
-     not a tooltip: same line, same weight, right-aligned so the column of
-     hours can be compared at a glance. */
-  .level { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
-           margin-bottom: 6px; cursor: pointer; display: block; }
-  .level:hover { background: #22262f; }
-  .level.checked { border-color: var(--accent); background: #1f2532; }
-  .level.disabled { opacity: .5; cursor: not-allowed; }
-  .level-head { display: flex; align-items: baseline; gap: 8px; }
-  .level-head input { width: auto; margin: 0; }
-  .level-head .name { font-weight: 600; }
-  .level-head .time { margin-left: auto; font-variant-numeric: tabular-nums;
-                      color: var(--accent); white-space: nowrap; }
-  .level-head .time.unknown { color: var(--muted); }
-  .level .help { margin-top: 4px; }
-  .option-row { display: flex; align-items: baseline; gap: 8px; margin: 8px 0 0; }
-  .option-row input { width: auto; }
-  .option-row .time { margin-left: auto; color: var(--muted);
-                      font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #estimateBasis { margin: 8px 0 4px; }
-  td.eta { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .progress-meta { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+  td.eta { white-space: nowrap; }
   td.eta .approx { color: var(--muted); }
-  #queueSummary { color: var(--muted); font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
-  #log { background: #0a0c10; border: 1px solid var(--border); border-radius: 6px; padding: 10px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; display: none; }
-  .modal-close { float: right; }
+  td.path { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #queueSummary { color: var(--muted); font-size: 12px; text-transform: none;
+                  letter-spacing: 0; font-weight: 400; }
+  #queueHint { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
+  #log { background: #07090c; border: 1px solid var(--border); border-radius: var(--r-sm);
+         padding: var(--s3); height: 320px; overflow: auto; margin-top: var(--s4);
+         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+         white-space: pre-wrap; display: none; }
+
+  /* --- phone ------------------------------------------------------------ */
+  /* The table becomes one card per job. No JS involved, so the queue logic
+     above cannot break on a narrow screen - only its presentation changes. */
+  @media (max-width: 860px) {
+    main { padding: var(--s3); gap: var(--s3); grid-template-columns: 1fr; }
+    header { padding: var(--s3) var(--s4); }
+    .banner { margin: 0 var(--s3); }
+    .panel { padding: var(--s3); }
+    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tr { border: 1px solid var(--border); border-radius: var(--r-sm);
+         margin-bottom: var(--s3); padding: var(--s2) 0; background: var(--raised); }
+    td { border-bottom: 0; padding: 4px var(--s3); display: flex; gap: var(--s3);
+         align-items: baseline; }
+    td::before { content: attr(data-label); color: var(--muted); font-size: 11px;
+                 text-transform: uppercase; letter-spacing: .06em; flex: none;
+                 width: 84px; }
+    td:empty { display: none; }
+    td.path { max-width: none; white-space: normal; word-break: break-all; }
+    .job-actions { flex-wrap: wrap; white-space: normal; }
+    #queueHint { display: none; }   /* dragging is a mouse gesture; the buttons stay */
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>iw3</h1>
-  <span class="help">2D &rarr; stereo-3D batch converter<span id="deviceLabel"></span></span>
+  <span class="sub">2D &rarr; stereo-3D batch converter<span id="deviceLabel"></span></span>
 </header>
 <div id="deviceBanner" class="banner" hidden></div>
 <main>
   <div class="panel">
-    <h2>1. Source (from /input)</h2>
+    <h2>1 &middot; Source</h2>
     <div id="browser"></div>
     <div id="selectedPath">No file or folder selected.</div>
     <div class="checkbox-row">
       <input type="checkbox" id="recursive">
-      <label style="margin:0" for="recursive">Process recursively (folder input)</label>
+      <label for="recursive">Process a whole folder, recursively</label>
     </div>
   </div>
 
   <div class="panel">
-    <h2>2. Settings</h2>
-    <label>Quality level</label>
+    <h2>2 &middot; Quality level</h2>
     <div id="qualityLevels"></div>
     <div id="qualityOptions"></div>
     <div id="estimateBasis" class="help"></div>
-    <label>Stereo format</label>
+    <label for="stereoFormat">Stereo format</label>
     <select id="stereoFormat"></select>
     <div id="settingsForm"></div>
   </div>
 
   <div class="panel full">
+    <h2>3 &middot; Run it</h2>
     <div class="actions">
-      <button id="btnPreview" class="secondary" title="Converts a 2-minute clip cut from the middle of the source, with the settings above. Runs before any queued conversion.">Preview (2 min clip)</button>
-      <button id="btnConvert">Add to queue</button>
+      <button id="btnConvert">Convert the whole file</button>
+      <button id="btnPreview" class="secondary">Preview one minute</button>
+    </div>
+    <label for="windowMode">Which minute to preview</label>
+    <div class="row">
+      <select id="windowMode">
+        <option value="auto">Pick it automatically</option>
+        <option value="manual">Start at a time I choose</option>
+      </select>
+      <input type="text" id="windowStart" placeholder="mm:ss or seconds" hidden>
+    </div>
+    <div id="windowHelp" class="help"></div>
+  </div>
+
+  <div class="panel full" id="comparePanel" hidden>
+    <h2>Compare two previews in one file</h2>
+    <div class="help" id="compareIntro"></div>
+    <div class="row" style="margin-top:var(--s3);flex-wrap:wrap">
+      <div><label for="cmpA">A</label><select id="cmpA"></select></div>
+      <div><label for="cmpB">B</label><select id="cmpB"></select></div>
+      <div><label for="cmpLayout">Arrangement</label><select id="cmpLayout"></select></div>
+    </div>
+    <div id="compareHelp" class="help"></div>
+    <div class="actions" style="margin-top:var(--s4)">
+      <button id="btnCompare" class="secondary">Build the comparison</button>
     </div>
   </div>
 
   <div class="panel full">
-    <h2>Job queue <span id="queueSummary"></span><span id="queueHint" class="help" style="float:right;text-transform:none;letter-spacing:0">drag a queued row to reorder &middot; &#10514; run next &middot; &#10515; run last</span></h2>
-    <table>
-      <thead><tr><th title="Drag a queued row to reorder it">#</th><th>Created</th><th>Mode</th><th>Quality</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
-      <tbody id="jobRows"></tbody>
-    </table>
+    <h2>Job queue <span id="queueSummary"></span>
+      <span id="queueHint" class="help">drag a waiting row to reorder &middot; &#10514; run next &middot; &#10515; run last</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th title="Drag a waiting row to reorder it">#</th><th>Created</th><th>Mode</th><th>Quality</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
+        <tbody id="jobRows"></tbody>
+      </table>
+    </div>
     <div id="log"></div>
   </div>
 </main>
@@ -152,17 +306,22 @@ async function api(path, opts) {
   return res.status === 204 ? null : res.json();
 }
 
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
 // --- Device ------------------------------------------------------------
+let health = null;
 async function loadHealth() {
-  let h;
-  try { h = await api("/health"); } catch (e) { return; }
+  try { health = await api("/health"); } catch (e) { return; }
   const label = document.getElementById("deviceLabel");
-  const dev = h.device === "cpu" ? "CPU" : h.device.toUpperCase();
-  const count = (h.accelerators?.[h.device]?.devices) || 0;
-  label.textContent = ` · ${dev}${count > 1 ? ` ×${count}` : ""} · torch ${h.torch}`;
-  if (h.warning) {
+  const dev = health.device === "cpu" ? "CPU" : health.device.toUpperCase();
+  const count = (health.accelerators?.[health.device]?.devices) || 0;
+  label.textContent = ` · ${dev}${count > 1 ? ` ×${count}` : ""} · torch ${health.torch}`;
+  if (health.warning) {
     const banner = document.getElementById("deviceBanner");
-    banner.textContent = "Running on the CPU. " + h.warning;
+    banner.textContent = "Running on the CPU. " + health.warning;
     banner.hidden = false;
   }
 }
@@ -176,14 +335,14 @@ async function loadBrowser(path) {
   if (data.path) {
     const up = document.createElement("div");
     up.className = "entry";
-    up.innerHTML = `<span class="icon">..</span> ..`;
+    up.innerHTML = `<span class="icon">↰</span> ..`;
     up.onclick = () => loadBrowser(data.path.split("/").slice(0, -1).join("/"));
     el.appendChild(up);
   }
   for (const entry of data.entries) {
     const row = document.createElement("div");
     row.className = "entry";
-    row.innerHTML = `<span class="icon">${entry.type === "dir" ? "📁" : "🎬"}</span> ${entry.name}`;
+    row.innerHTML = `<span class="icon">${entry.type === "dir" ? "📁" : "🎬"}</span> ${esc(entry.name)}`;
     row.onclick = (e) => {
       if (entry.type === "dir" && e.detail === 2) { loadBrowser(entry.path); return; }
       document.querySelectorAll(".entry.selected").forEach(x => x.classList.remove("selected"));
@@ -214,6 +373,15 @@ function selectedOptions() {
   };
 }
 
+function ledger(pros, cons) {
+  const line = (cls, mark, text) =>
+    `<li class="${cls}"><span class="mark">${mark}</span><span>${esc(text)}</span></li>`;
+  return `<ul class="ledger">`
+    + (pros || []).map(t => line("pro", "+", t)).join("")
+    + (cons || []).map(t => line("con", "−", t)).join("")
+    + `</ul>`;
+}
+
 function renderQuality() {
   currentLevel = quality.default;
   const box = document.getElementById("qualityLevels");
@@ -227,25 +395,41 @@ function renderQuality() {
         <input type="radio" name="quality" value="${lv.id}"
                ${lv.id === currentLevel ? "checked" : ""}
                ${lv.available ? "" : "disabled"}>
-        <span class="name">${lv.label}</span>
+        <span class="name">${esc(lv.label)}</span>
         <span class="time" id="t_${lv.id}">—</span>
       </span>
-      <span class="help">${lv.available ? lv.cost_sentence : lv.unavailable_reason}</span>`;
+      ${lv.available ? "" : `<div class="blocked">${esc(lv.unavailable_reason)}</div>`}
+      <div class="uses">${esc(lv.uses || "")}</div>
+      ${lv.good_for ? `<div class="for">Good for: ${esc(lv.good_for)}</div>` : ""}
+      ${ledger(lv.pros, lv.cons)}`;
     el.querySelector("input").onchange = () => { currentLevel = lv.id; applyLevel(); };
     box.appendChild(el);
   }
 
   const opts = document.getElementById("qualityOptions");
   opts.innerHTML = quality.options.map(op => `
-    <div class="option-row" id="row_${op.id}">
-      <input type="checkbox" id="opt_${op.id}">
-      <label style="margin:0" for="opt_${op.id}">${op.label}</label>
-      <span class="time" id="t_opt_${op.id}">—</span>
-    </div>
-    <div class="help">${op.cost_sentence}</div>`).join("");
+    <div class="option" id="row_${op.id}">
+      <div class="option-head">
+        <input type="checkbox" id="opt_${op.id}">
+        <label for="opt_${op.id}">${esc(op.label)}</label>
+        <span class="time" id="t_opt_${op.id}">—</span>
+      </div>
+      <div class="uses">${esc(op.uses || "")}</div>
+      ${ledger(op.pros, op.cons)}
+    </div>`).join("");
   for (const op of quality.options) {
     document.getElementById(`opt_${op.id}`).onchange = refreshEstimates;
   }
+  document.getElementById("windowHelp").innerHTML =
+    `<strong>Automatic:</strong> ${esc(quality.preview.window_rule)}<br>`
+    + `Either way the pipeline runs ${quality.preview.lead_frames} frames before the `
+    + `window and ${quality.preview.tail_frames} after it, and both are cut away again. `
+    + `That is not padding: the convergence estimator carries a moving average across `
+    + `frames, so a window started cold is not the same recipe as the full run.`;
+
+  const layouts = document.getElementById("cmpLayout");
+  layouts.innerHTML = quality.compare_layouts
+    .map(l => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
   applyLevel();
 }
 
@@ -260,7 +444,7 @@ function applyLevel() {
   for (const op of quality.options) {
     const row = document.getElementById(`row_${op.id}`);
     const usable = !op.chain_only || lv.chain;
-    row.style.opacity = usable ? "1" : ".45";
+    row.classList.toggle("off", !usable);
     const box = document.getElementById(`opt_${op.id}`);
     box.disabled = !usable;
     if (!usable) box.checked = false;
@@ -270,21 +454,24 @@ function applyLevel() {
 
 async function refreshEstimates() {
   const o = selectedOptions();
-  const q = new URLSearchParams({
-    path: (selected && selected.type === "file") ? selected.path : "",
-    flow: o.flow, upscale: o.upscale,
-  });
-  let est;
-  try { est = await api("/estimate?" + q.toString()); } catch (e) { return; }
+  const path = (selected && selected.type === "file") ? selected.path : "";
+  const q = new URLSearchParams({ path, flow: o.flow, upscale: o.upscale });
+  const qp = new URLSearchParams({ path, mode: "preview", flow: o.flow, upscale: o.upscale });
+  let est, pre;
+  try {
+    [est, pre] = await Promise.all([api("/estimate?" + q), api("/estimate?" + qp)]);
+  } catch (e) { return; }
 
   for (const lv of quality.levels) {
     const cell = document.getElementById(`t_${lv.id}`);
-    const v = est.levels[lv.id];
+    const v = est.levels[lv.id], p = pre.levels[lv.id];
     if (!v || v.seconds === null) {
       cell.textContent = "not modelled";
       cell.className = "time unknown";
     } else {
-      cell.textContent = (v.extrapolated ? "≈ " : "~ ") + fmtDuration(v.seconds);
+      const mark = v.extrapolated ? "≈ " : "~ ";
+      cell.textContent = mark + fmtDuration(v.seconds)
+        + (p && p.seconds !== null ? ` · preview ${fmtDuration(p.seconds)}` : "");
       cell.className = "time";
       cell.title = (v.extrapolated
         ? "Extrapolated from HD measurements by this machine's own HD:4K rate ratio - no level has been measured on a 4K source. "
@@ -296,15 +483,33 @@ async function refreshEstimates() {
     cell.textContent = "+ " + fmtDuration(est.options[op.id].seconds);
     cell.title = op.notes || "";
   }
-  document.getElementById("estimateBasis").textContent =
-    `Times for ${est.frames.toLocaleString()} frames (${est.basis}` +
-    `${est.resolution_bucket === "4k" ? ", 4K - extrapolated" : ""}).`;
+  const w = pre.preview_window;
+  document.getElementById("estimateBasis").innerHTML =
+    `Times for <strong>${est.frames.toLocaleString()} frames</strong> (${esc(est.basis)}`
+    + `${est.resolution_bucket === "4k" ? ", 4K &ndash; extrapolated" : ""}). `
+    + (w ? `A preview covers ${w.visible.toLocaleString()} visible frames plus `
+         + `${w.lead} of lead and ${w.tail} of tail &mdash; `
+         + `<strong>${pre.frames.toLocaleString()} of ${pre.source_frames.toLocaleString()} `
+         + `frames, ${pre.preview_share}%</strong> of the file.` : "");
 }
+
+// --- Preview window -----------------------------------------------------
+function parseTime(text) {
+  const t = (text || "").trim();
+  if (!t) return null;
+  const parts = t.split(":").map(Number);
+  if (parts.some(isNaN)) return NaN;
+  return parts.reduce((acc, p) => acc * 60 + p, 0);
+}
+
+document.getElementById("windowMode").onchange = (e) => {
+  document.getElementById("windowStart").hidden = e.target.value !== "manual";
+};
 
 // --- Settings form ------------------------------------------------------
 function renderSettingsForm() {
   const sel = document.getElementById("stereoFormat");
-  sel.innerHTML = schema.stereo_formats.map(f => `<option value="${f.value}">${f.label}</option>`).join("");
+  sel.innerHTML = schema.stereo_formats.map(f => `<option value="${f.value}">${esc(f.label)}</option>`).join("");
 
   const container = document.getElementById("settingsForm");
   container.innerHTML = "";
@@ -313,24 +518,24 @@ function renderSettingsForm() {
     if (f.kind === "bool") {
       wrap.className = "checkbox-row";
       wrap.innerHTML = `<input type="checkbox" id="f_${f.dest}" ${f.default ? "checked" : ""}>
-        <label style="margin:0" for="f_${f.dest}">${f.label}</label>`;
+        <label for="f_${f.dest}">${esc(f.label)}</label>`;
     } else if (f.kind === "select") {
-      wrap.innerHTML = `<label>${f.label}</label>
+      wrap.innerHTML = `<label for="f_${f.dest}">${esc(f.label)}</label>
         <select id="f_${f.dest}">${(f.choices || []).map(c =>
           `<option value="${c ?? ''}" ${c === f.default ? "selected" : ""}>${c ?? '(auto)'}</option>`).join("")}</select>`;
     } else if (f.kind === "int_pair") {
       const d = f.default || [0, 0];
-      wrap.innerHTML = `<label>${f.label}</label>
+      wrap.innerHTML = `<label>${esc(f.label)}</label>
         <div class="row">
           <input type="number" id="f_${f.dest}_x" value="${d[0]}">
           <input type="number" id="f_${f.dest}_y" value="${d[1]}">
         </div>`;
     } else {
-      wrap.innerHTML = `<label>${f.label}</label>
+      wrap.innerHTML = `<label for="f_${f.dest}">${esc(f.label)}</label>
         <input type="number" id="f_${f.dest}" value="${f.default ?? 0}"
           min="${f.min ?? ''}" max="${f.max ?? ''}" step="${f.step ?? 1}">`;
     }
-    if (f.help) wrap.innerHTML += `<div class="help">${f.help}</div>`;
+    if (f.help) wrap.innerHTML += `<div class="help">${esc(f.help)}</div>`;
     container.appendChild(wrap);
   }
 }
@@ -359,6 +564,14 @@ async function submitJob(mode) {
   if (!selected) { alert("Select a file or folder first."); return; }
   const lv = quality.levels.find(l => l.id === currentLevel) || {};
   const o = selectedOptions();
+  let startSec = null;
+  if (mode === "preview" && document.getElementById("windowMode").value === "manual") {
+    startSec = parseTime(document.getElementById("windowStart").value);
+    if (startSec === null || isNaN(startSec)) {
+      alert("Give the start of the preview window as seconds or mm:ss.");
+      return;
+    }
+  }
   const body = {
     mode,
     input_path: selected.path,
@@ -367,6 +580,7 @@ async function submitJob(mode) {
     quality: currentLevel,
     flow: o.flow,
     upscale: o.upscale,
+    preview_start_sec: startSec,
     // A named level carries its own parameters; sending the form alongside
     // would only invite the question of which one won.
     params: lv.settings_form ? collectParams() : {},
@@ -383,6 +597,72 @@ async function submitJob(mode) {
 document.getElementById("btnConvert").onclick = () => submitJob("convert");
 document.getElementById("btnPreview").onclick = () => submitJob("preview");
 
+// --- Comparing two previews --------------------------------------------
+// Offered only when there are two to compare, because an empty pair of
+// dropdowns is a question the page cannot answer.
+let comparable = [];
+
+function describePreview(p) {
+  const bits = [p.quality_label];
+  if (p.flow) bits.push("+flow");
+  if (p.upscale) bits.push("+4K");
+  const at = p.preview_start_sec === null ? "auto window"
+           : `from ${fmtDuration(p.preview_start_sec)}`;
+  return `${bits.join(" ")} · ${p.input_path.split("/").pop()} · ${at}`;
+}
+
+async function refreshComparable() {
+  let next;
+  try { next = await api("/comparable"); } catch (e) { return; }
+  const changed = JSON.stringify(next.map(p => p.id)) !== JSON.stringify(comparable.map(p => p.id));
+  comparable = next;
+  const panel = document.getElementById("comparePanel");
+  panel.hidden = comparable.length < 2;
+  if (panel.hidden || !changed) return;
+  for (const [id, pick] of [["cmpA", 0], ["cmpB", 1]]) {
+    const sel = document.getElementById(id);
+    const keep = sel.value;
+    sel.innerHTML = comparable.map(p =>
+      `<option value="${p.id}">${esc(describePreview(p))}</option>`).join("");
+    sel.value = comparable.some(p => p.id === keep) ? keep : (comparable[pick]?.id || "");
+  }
+  document.getElementById("compareIntro").innerHTML =
+    "Both previews are already side-by-side stereo, so they are interleaved "
+    + "<strong>per eye</strong>: the left eye gets A's left eye and B's left eye, the "
+    + "right eye gets both right eyes. Laying two stereo frames next to each other "
+    + "instead would hand the headset one recipe per eye.";
+  document.getElementById("compareHelp").innerHTML =
+    "<strong>A / B / A</strong> keeps the geometry exactly as it is and shows the same "
+    + "window three times. It is how every recipe question was actually settled: seeing "
+    + "the change twice, and in both directions, finds differences that sitting side by "
+    + "side does not.<br>"
+    + "<strong>A above B</strong> puts both in view at once, 1920×2160 per eye. Vertical "
+    + "rather than horizontal so each keeps a full 1920×1080 picture &ndash; but each eye "
+    + "is then 16:18, and a player that assumes 16:9 per eye will stretch it.";
+}
+
+document.getElementById("btnCompare").onclick = async () => {
+  const body = {
+    a: document.getElementById("cmpA").value,
+    b: document.getElementById("cmpB").value,
+    layout: document.getElementById("cmpLayout").value,
+  };
+  try {
+    const r = await api("/compare", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.same_source) {
+      alert("Queued - but those two previews are of different source files, so the "
+            + "comparison shows two films rather than two recipes.");
+    }
+  } catch (e) {
+    alert("Could not build the comparison:\n\n" + e.message);
+    return;
+  }
+  refreshJobs();
+};
+
 // --- Job queue table --------------------------------------------------
 let openLogJobId = null;
 let logEventSource = null;
@@ -397,15 +677,23 @@ function fmtDuration(sec) {
   return `${s}s`;
 }
 
+const STATUS_WORD = { queued: "waiting", running: "running", done: "done",
+                      failed: "failed", canceled: "canceled" };
+
 // The level a job ran at, plus its switches. Jobs from before the levels
 // existed carry 'custom', which is what they were.
 function qualityCell(j) {
+  if (j.mode === "compare") {
+    let p = {};
+    try { p = JSON.parse(j.params_json); } catch (e) {}
+    return esc(p.layout === "stacked" ? "stacked" : "A/B/A");
+  }
   const lv = quality?.levels.find(l => l.id === j.quality);
   const bits = [];
   if (j.opt_flow) bits.push("flow");
   if (j.opt_upscale) bits.push("4K");
-  return (lv ? lv.label : (j.quality || "custom"))
-    + (bits.length ? ` <span class="help">+${bits.join(" +")}</span>` : "");
+  return esc(lv ? lv.label : (j.quality || "custom"))
+    + (bits.length ? ` <span class="help" style="display:inline">+${bits.join(" +")}</span>` : "");
 }
 
 function progressCell(j) {
@@ -418,11 +706,12 @@ function progressCell(j) {
     return `<div class="bar indeterminate"><span></span></div>
             <div class="progress-meta">starting…</div>`;
   }
-  // Cutting the preview clip happens before iw3 starts, so there is no tqdm
-  // bar to show yet - only a statement of what the job is busy with.
-  if (p.phase === "extract") {
+  // Choosing and cutting the preview window happens before iw3 starts, so
+  // there is no tqdm bar to show yet - only a statement of what it is busy with.
+  if (p.phase === "extract" || p.phase === "scan") {
     return `<div class="bar indeterminate"><span></span></div>
-            <div class="progress-meta">cutting preview clip…</div>`;
+            <div class="progress-meta">${p.phase === "scan"
+              ? "choosing the preview window…" : "cutting the preview clip…"}</div>`;
   }
   // A pipeline job is five or six programs of wildly different lengths, so
   // there is no honest single percentage for the job. What there is: which
@@ -431,7 +720,7 @@ function progressCell(j) {
     const bar = p.percent === null
       ? `<div class="bar indeterminate"><span></span></div>`
       : `<div class="bar"><span style="width:${p.percent}%"></span></div>`;
-    const parts = [`stage ${p.stage}/${p.stages}`, p.stage_label];
+    const parts = [`stage ${p.stage}/${p.stages}`, esc(p.stage_label)];
     if (p.percent !== null) parts.push(`${p.percent}% of the stage`);
     if (p.rate_fps) parts.push(`${p.rate_fps} fps`);
     return `${bar}<div class="progress-meta">${parts.join(" · ")}</div>`;
@@ -558,7 +847,9 @@ async function refreshJobs() {
   for (const j of jobs) {
     const tr = document.createElement("tr");
     tr.dataset.id = j.id;
-    const queued = j.status === "queued";
+    // A comparison is not in the conversion queue and cannot be reordered into
+    // it - it runs on its own worker, alongside whatever is on the GPU.
+    const queued = j.status === "queued" && j.mode !== "compare";
     tr.className = queued ? "queued-row"
                   : j.status === "running" ? "running-row" : "history-row";
     const created = new Date(j.created_at).toLocaleString();
@@ -566,16 +857,16 @@ async function refreshJobs() {
       ? `<span class="grip">&#10303;</span><span class="${j.queue_index === 1 ? "next" : ""}">${j.queue_index}</span>`
       : j.status === "running" ? `<span class="next">&#9654;</span>` : "";
     tr.innerHTML = `
-      <td class="pos">${pos}</td>
-      <td>${created}</td>
-      <td>${j.mode}</td>
-      <td>${qualityCell(j)}</td>
-      <td title="${j.input_path}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${j.input_path}</td>
-      <td>${j.stereo_format}</td>
-      <td><span class="status status-${j.status}">${j.status}</span></td>
-      <td>${progressCell(j)}</td>
-      <td class="eta">${etaCell(j)}</td>
-      <td class="job-actions"></td>
+      <td class="pos" data-label="Queue">${pos}</td>
+      <td data-label="Created">${esc(created)}</td>
+      <td data-label="Mode">${esc(j.mode)}</td>
+      <td data-label="Quality">${qualityCell(j)}</td>
+      <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? j.output_path.split("/").pop() : j.input_path)}</td>
+      <td data-label="Format">${esc(j.stereo_format)}</td>
+      <td data-label="Status"><span class="status status-${j.status}" title="${esc(j.error || "")}">${STATUS_WORD[j.status] || j.status}</span></td>
+      <td data-label="Progress">${progressCell(j)}</td>
+      <td class="eta" data-label="ETA">${etaCell(j)}</td>
+      <td class="job-actions" data-label=""></td>
     `;
     if (queued) {
       tr.draggable = true;
@@ -602,11 +893,12 @@ async function refreshJobs() {
     if (queued) {
       // Dragging is fine over a screenful. A queue a hundred deep is why this
       // feature was asked for, and "run this next" should not require holding
-      // the mouse down while the page scrolls.
+      // the mouse down while the page scrolls. It is also the only way to
+      // reorder on a phone, where HTML5 drag and drop does not exist.
       const move = document.createElement("span");
       move.className = "move";
-      for (const [label, to, title] of [["\u2912", "top", "Run next"],
-                                         ["\u2913", "bottom", "Run last"]]) {
+      for (const [label, to, title] of [["⤒", "top", "Run next"],
+                                         ["⤓", "bottom", "Run last"]]) {
         const b = document.createElement("button");
         b.textContent = label;
         b.title = title;
@@ -636,6 +928,7 @@ async function refreshJobs() {
     tbody.appendChild(tr);
   }
   refreshQueueSummary();
+  refreshComparable();
 }
 
 // Rendering every SSE message straight into the DOM (textContent +=) is what
