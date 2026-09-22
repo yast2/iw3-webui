@@ -4,304 +4,416 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>iw3 - 2D to 3D converter</title>
+<title>iw3 · 2D to 3D converter</title>
 <style>
-  /* One static page, no framework, nothing fetched from the network: this is a
-     LAN service and it has to come up when the LAN is all there is. Everything
-     below is plain CSS against the markup this file writes itself. */
-  :root {
-    --bg: #101216; --panel: #191c22; --raised: #21252e; --border: #2b3039;
-    --text: #e6e8ed; --muted: #949aa8; --faint: #6b7280;
-    --accent: #5b94ff; --accent-dim: #24304d;
-    --ok: #46d19a; --err: #ff6b6b; --warn: #e3ae4a;
-    --r: 10px; --r-sm: 6px;
-    --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
-    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.22);
-  }
-  * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-  body {
-    background: var(--bg); color: var(--text); margin: 0;
-    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-variant-numeric: tabular-nums;
-  }
-  a { color: var(--accent); }
+  /* One static page, no framework, nothing fetched from the network at
+     runtime: this is a LAN service and it has to come up when the LAN is all
+     there is. The fonts are bundled next to this file (SIL OFL 1.1, licence
+     files alongside) and served by the same process. */
+  @font-face{font-family:'Inter';font-style:normal;font-weight:100 900;font-display:swap;
+    src:url(/static/fonts/inter-latin.woff2) format('woff2')}
+  @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:400;font-display:swap;
+    src:url(/static/fonts/ibm-plex-mono-latin-400.woff2) format('woff2')}
+  @font-face{font-family:'IBM Plex Mono';font-style:normal;font-weight:600;font-display:swap;
+    src:url(/static/fonts/ibm-plex-mono-latin-600.woff2) format('woff2')}
 
-  header {
-    padding: var(--s4) var(--s5); border-bottom: 1px solid var(--border);
-    display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap;
-    background: var(--panel);
+  :root{
+    --bg:#0a0a0a; --panel:#161616; --panel-2:#1e1e1e; --line:#2a2a2a;
+    --inset:#050505;
+    --text:#f2f2f2; --muted:#9a9a9a; --faint:#5e5e5e;
+    --accent:#ff9900; --accent-press:#e07f00;
+    --ok:#ff9900; --warn:#f2c14e; --bad:#e0574e; --sel:#ff9900;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:'Inter',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    --r:10px;
   }
-  header h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: -.01em; }
-  header .sub { color: var(--muted); font-size: 13px; }
+  *{box-sizing:border-box}
+  /* The page hides things with the hidden attribute (settings form, start
+     field, compare panel). A class that sets display would otherwise win over
+     the browser's own [hidden] rule and leave them on screen. */
+  [hidden]{display:none!important}
+  html{-webkit-text-size-adjust:100%}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;font-size:15px;line-height:1.5;
+    font-variant-numeric:tabular-nums}
+  a{color:var(--sel)}
+  button{font-family:var(--sans);cursor:pointer}
+  ::selection{background:rgba(255,153,0,.3)}
 
-  main {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-    gap: var(--s5); padding: var(--s5); max-width: 1500px; margin: 0 auto;
-    align-items: start;
-  }
-  .panel {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: var(--r); padding: var(--s4) var(--s4) var(--s5);
-    box-shadow: var(--shadow);
-  }
-  .panel > h2 {
-    font-size: 12px; margin: 0 0 var(--s4); color: var(--muted);
-    text-transform: uppercase; letter-spacing: .08em; font-weight: 650;
-    display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap;
-  }
-  .full { grid-column: 1 / -1; }
+  /* ---- top bar ---- */
+  header{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:18px;
+    padding:14px 26px;background:linear-gradient(180deg,#0e0e0e,#080808);
+    border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:13px;min-width:0}
+  .brand .logo{display:inline-flex;align-items:center;font-weight:700;font-size:20px;
+    line-height:1;letter-spacing:-.2px}
+  .brand .logo .w{color:#fff}
+  .brand .logo .b{background:var(--accent);color:#000;padding:3px 8px;border-radius:5px;
+    margin-left:6px}
+  .brand .sub{font-family:var(--mono);font-size:11px;color:var(--faint);
+    text-transform:uppercase;letter-spacing:2px;padding-left:13px;border-left:1px solid var(--line)}
+  .pills{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+  .pill{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:12px;
+    padding:5px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);
+    background:#111;white-space:nowrap}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(255,153,0,.18)}
+  .dot.warn{background:var(--warn)}
+  .dot.bad{background:var(--bad)}
+  .dot.run{background:var(--ok);box-shadow:0 0 0 3px rgba(255,153,0,.18);
+    animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
-  /* --- forms ------------------------------------------------------------ */
-  label { display: block; margin: var(--s4) 0 var(--s1); color: var(--muted); font-size: 12px;
-          text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
-  input[type=number], input[type=text], select {
-    width: 100%; background: #0c0e13; border: 1px solid var(--border);
-    color: var(--text); padding: 9px 10px; border-radius: var(--r-sm);
-    font: inherit; font-size: 14px;
-  }
-  input:focus-visible, select:focus-visible, button:focus-visible, .level:focus-within {
-    outline: 2px solid var(--accent); outline-offset: 2px;
-  }
-  .row { display: flex; gap: var(--s3); }
-  .row > * { flex: 1; }
-  .checkbox-row { display: flex; align-items: center; gap: var(--s2); margin: var(--s3) 0; }
-  .checkbox-row input { width: auto; }
-  .checkbox-row label { margin: 0; text-transform: none; letter-spacing: 0;
-                        font-size: 14px; font-weight: 400; color: var(--text); }
-  .help { color: var(--muted); font-size: 12.5px; line-height: 1.5; margin-top: var(--s1); }
-  .help strong { color: var(--text); font-weight: 600; }
+  .banner{margin:14px 26px 0;padding:11px 15px;border-radius:var(--r);
+    font-family:var(--mono);font-size:12px;color:#f0c98a;background:rgba(242,193,78,.08);
+    border:1px solid rgba(242,193,78,.3);line-height:1.5}
 
-  button {
-    background: var(--accent); color: #fff; border: 1px solid transparent;
-    padding: 9px 16px; border-radius: var(--r-sm); cursor: pointer;
-    font: inherit; font-size: 14px; font-weight: 550; min-height: 38px;
-  }
-  button:hover:not(:disabled) { filter: brightness(1.12); }
-  button.secondary { background: var(--raised); border-color: var(--border); color: var(--text); }
-  button.danger { background: transparent; border-color: #5b3030; color: var(--err); }
-  button:disabled { opacity: .4; cursor: not-allowed; }
-  .actions { display: flex; gap: var(--s3); flex-wrap: wrap; }
+  /* ---- layout: step rail + work column ---- */
+  .wrap{display:grid;grid-template-columns:210px minmax(0,1fr);gap:0;
+    max-width:1240px;margin:0 auto;padding:30px 26px 80px}
+  .rail{position:sticky;top:90px;align-self:start;height:max-content;padding-top:6px}
+  .rail ol{list-style:none;margin:0;padding:0;position:relative}
+  .rail ol::before{content:"";position:absolute;left:13px;top:14px;bottom:14px;width:2px;
+    background:var(--line)}
+  .step{position:relative;padding:0 0 26px 40px;color:var(--faint);cursor:pointer}
+  .step:last-child{padding-bottom:0}
+  .step .node{position:absolute;left:5px;top:0;width:18px;height:18px;border-radius:50%;
+    border:2px solid var(--line);background:var(--bg);font-family:var(--mono);font-size:10px;
+    display:flex;align-items:center;justify-content:center;color:var(--faint);transition:.25s}
+  .step .k{font-family:var(--mono);font-size:11px;letter-spacing:2px;text-transform:uppercase}
+  .step .t{font-weight:600;font-size:13px;color:inherit;margin-top:1px}
+  .step.active{color:var(--text)}
+  .step.active .node{border-color:var(--accent);color:var(--accent);
+    box-shadow:0 0 0 4px rgba(255,153,0,.14)}
+  .step.done{color:var(--muted)}
+  .step.done .node{border-color:var(--ok);background:var(--ok);color:#000}
+  .step.done .node::after{content:"\2713"}
+  .step.done .node span{display:none}
 
-  /* --- file browser ----------------------------------------------------- */
-  #browser { max-height: 300px; overflow-y: auto; border: 1px solid var(--border);
-             border-radius: var(--r-sm); background: #0c0e13; }
-  .entry { padding: 8px 10px; cursor: pointer; display: flex; gap: var(--s2);
-           align-items: center; border-bottom: 1px solid #1a1d24; font-size: 14px; }
-  .entry:last-child { border-bottom: 0; }
-  .entry:hover { background: var(--raised); }
-  .entry.selected { background: var(--accent-dim); }
-  .entry .icon { width: 18px; opacity: .8; flex: none; }
-  #selectedPath { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                  font-size: 13px; color: var(--accent); word-break: break-all;
-                  margin-top: var(--s3); min-height: 1.4em; }
+  /* ---- panels ---- */
+  .col{display:flex;flex-direction:column;gap:22px;min-width:0}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);
+    overflow:hidden}
+  .phead{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#1c1c1c,#161616)}
+  .phead .idx{font-family:var(--mono);font-size:12px;color:var(--accent)}
+  .phead h2{margin:0;font-size:15px;font-weight:600;letter-spacing:.2px}
+  .phead .hint{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint);
+    text-align:right}
+  .pbody{padding:18px}
 
-  /* --- quality level cards ---------------------------------------------- */
-  /* A level is picked by what it costs and what it gives up, so both are on
-     the card. The disadvantages are set in the same size and weight as the
-     advantages: a level whose drawbacks are in smaller type is being sold. */
-  /* The levels sit side by side, not stacked. Four detailed cards in a column
-     push the rest of the form off the screen; in a row the whole choice is
-     visible at once and no drawback has to be hidden to achieve it. Narrow
-     windows drop to fewer columns on their own. */
-  #qualityLevels {
-    display: grid; gap: var(--s2);
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    align-items: stretch;
-  }
-  .level {
-    display: block; position: relative; border: 1px solid var(--border);
-    border-radius: var(--r); padding: var(--s3); margin: 0;
-    cursor: pointer; background: var(--raised); transition: border-color .12s, background .12s;
-  }
-  .level::before {
-    content: ""; position: absolute; left: -1px; top: 12px; bottom: 12px; width: 3px;
-    border-radius: 3px; background: transparent;
-  }
-  .level:hover:not(.disabled) { border-color: #3b4252; }
-  .level.checked { border-color: var(--accent); background: #1b2230; }
-  .level.checked::before { background: var(--accent); }
-  .level.disabled { opacity: .55; cursor: not-allowed; }
-  .level-head { display: flex; align-items: baseline; gap: var(--s2); flex-wrap: wrap; }
-  .level-head input { width: auto; margin: 0; flex: none; accent-color: var(--accent); }
-  .level-head .name { font-weight: 650; font-size: 15.5px; }
-  .level-head .time {
-    margin-left: auto; color: var(--accent); white-space: nowrap; font-weight: 600;
-  }
-  .level.checked .level-head .time { color: #8fb4ff; }
-  .level-head .time.unknown { color: var(--faint); font-weight: 400; }
-  .level .uses { margin-top: var(--s2); color: var(--text); font-size: 13.5px; }
-  .level .for { margin-top: var(--s1); color: var(--muted); font-size: 13px; }
-  .ledger { margin: var(--s3) 0 0; padding: 0; list-style: none; font-size: 13px; }
-  .ledger li { display: flex; gap: var(--s2); margin-top: var(--s1); line-height: 1.5; }
-  .ledger .mark { flex: none; width: 1em; font-weight: 700; }
-  .ledger .pro .mark { color: var(--ok); }
-  .ledger .con .mark { color: var(--err); }
-  .ledger li span:last-child { color: var(--muted); }
-  .level.checked .ledger li span:last-child { color: #c6cad4; }
-  .level .blocked { margin-top: var(--s2); color: var(--warn); font-size: 13px; }
+  /* ---- file browser ---- */
+  .crumbs{display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-family:var(--mono);
+    font-size:12.5px;margin-bottom:12px;color:var(--muted)}
+  .crumbs button{background:none;border:none;color:var(--sel);padding:2px 4px;font-family:var(--mono);
+    font-size:12.5px;border-radius:5px}
+  .crumbs button:hover{background:#1e1e1e}
+  .crumbs .sep{color:var(--faint)}
+  .list{border:1px solid var(--line);border-radius:8px;max-height:340px;overflow:auto;background:var(--inset)}
+  .row{display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #1a1a1a;
+    cursor:pointer;font-family:var(--mono);font-size:13px}
+  .row:last-child{border-bottom:none}
+  .row:hover{background:#181818}
+  .row .ico{width:16px;text-align:center;color:var(--faint);flex:none}
+  .row.dir .ico{color:var(--accent)}
+  .row .nm{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+  .row .pick{opacity:0;font-family:var(--sans);font-size:11px;font-weight:600;color:#000;
+    border:1px solid var(--accent);background:var(--accent);padding:3px 9px;border-radius:6px;flex:none}
+  .row:hover .pick{opacity:1}
+  .row.selected{background:rgba(255,153,0,.07);outline:1px solid rgba(255,153,0,.5);outline-offset:-1px}
+  .empty{padding:24px;text-align:center;color:var(--faint);font-family:var(--mono);font-size:12.5px}
+  .selbar{display:flex;align-items:center;gap:10px;margin-top:14px;padding:11px 14px;
+    border:1px dashed var(--line);border-radius:8px;background:var(--inset);font-family:var(--mono);font-size:12.5px}
+  .selbar .lab{color:var(--faint);text-transform:uppercase;letter-spacing:1px;font-size:10px;flex:none}
+  .selbar .val{color:var(--sel);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1}
+  .selbar.none .val{color:var(--faint)}
+  .checkline{display:flex;align-items:center;gap:9px;margin-top:12px;font-size:13.5px}
+  .checkline input{width:auto;margin:0;accent-color:var(--accent)}
+  .checkline label{color:var(--text);cursor:pointer}
 
-  .option {
-    border: 1px solid var(--border); border-radius: var(--r-sm);
-    padding: var(--s3) var(--s4); margin-bottom: var(--s2); background: var(--raised);
-  }
-  .option-head { display: flex; align-items: baseline; gap: var(--s2); }
-  .option-head input { width: auto; margin: 0; flex: none; accent-color: var(--accent); }
-  .option-head label { margin: 0; text-transform: none; letter-spacing: 0;
-                       font-size: 14px; font-weight: 600; color: var(--text); }
-  .option-head .time { margin-left: auto; color: var(--muted); white-space: nowrap; }
-  .option.off { opacity: .45; }
-  #estimateBasis { margin-top: var(--s3); padding-top: var(--s3);
-                   border-top: 1px solid var(--border); }
+  /* ---- buttons ---- */
+  .btn{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--accent);
+    background:var(--accent);color:#000;font-weight:700;font-size:14px;padding:10px 18px;
+    border-radius:8px;transition:.15s}
+  .btn:hover:not(:disabled){background:var(--accent-press);border-color:var(--accent-press)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.ghost{background:transparent;color:var(--text);border-color:var(--line);font-weight:600}
+  .btn.ghost:hover:not(:disabled){background:#1e1e1e;border-color:#3a3a3a}
+  .btn.danger{background:transparent;color:var(--bad);border-color:rgba(224,87,78,.4);font-weight:600}
+  .btn.danger:hover:not(:disabled){background:rgba(224,87,78,.1);border-color:var(--bad)}
+  .btn.sm{padding:5px 10px;font-size:12px}
+  .actions{display:flex;gap:10px;flex-wrap:wrap}
 
-  /* --- notices ---------------------------------------------------------- */
-  .banner { margin: 0 var(--s5) calc(-1 * var(--s2)); padding: 11px 15px; border-radius: var(--r);
-            background: #332913; border: 1px solid var(--warn); color: #f2ddb2;
-            font-size: 13.5px; line-height: 1.5; }
-  .banner + .banner { margin-top: var(--s3); }
+  /* ---- form ---- */
+  select,input[type=text],input[type=number]{font-family:var(--mono);font-size:13px;color:var(--text);
+    background:var(--inset);border:1px solid var(--line);border-radius:7px;padding:9px 11px;width:100%}
+  select:focus,input:focus{outline:none;border-color:var(--sel);
+    box-shadow:0 0 0 3px rgba(255,153,0,.16)}
+  .field{display:flex;flex-direction:column;gap:6px;margin-top:14px}
+  .field label{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1px;
+    color:var(--muted)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+  .grid3{grid-template-columns:1fr 1fr 1fr}
+  .note{font-family:var(--mono);font-size:12px;color:var(--faint);margin-top:10px;line-height:1.6}
+  .note strong{color:var(--muted)}
+  .help{color:var(--muted);font-size:12.5px;line-height:1.55;margin-top:6px}
+  .help strong{color:var(--text);font-weight:600}
 
-  /* --- job table -------------------------------------------------------- */
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
-  th { color: var(--muted); font-weight: 600; font-size: 11px;
-       text-transform: uppercase; letter-spacing: .06em; white-space: nowrap; }
-  tbody tr:hover td { background: #1d212a; }
-  .status { padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 650;
-            white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
-  .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-  .status-queued { background: #262a33; color: var(--muted); }
-  .status-running { background: var(--accent-dim); color: #8fb4ff; }
-  .status-running::before { animation: pulse 1.2s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
-  .status-done { background: #14382a; color: var(--ok); }
-  .status-failed { background: #3a1d1d; color: var(--err); }
-  .status-canceled { background: #262a33; color: var(--faint); }
-  .job-actions { white-space: nowrap; }
-  .job-actions button { padding: 4px 9px; font-size: 12px; min-height: 30px; }
+  /* ---- quality levels ---- */
+  /* The levels sit in a compact row of cards carrying the name and the time,
+     nothing else; the full description of the one that is picked appears
+     below. A level is chosen by what it costs and what it gives up, so the
+     drawbacks are in the detail in the same size and weight as the
+     advantages: a level whose drawbacks are set smaller than its advantages
+     is being sold, not described. */
+  .levels{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+    align-items:stretch}
+  .level{position:relative;border:1px solid var(--line);border-radius:8px;padding:9px 12px;
+    background:var(--inset);cursor:pointer;transition:border-color .12s,background .12s}
+  .level::before{content:"";position:absolute;left:-1px;top:10px;bottom:10px;width:3px;
+    border-radius:3px;background:transparent}
+  .level:hover:not(.locked){border-color:#3a3a3a}
+  .level.checked{border-color:var(--accent);background:rgba(255,153,0,.06)}
+  .level.checked::before{background:var(--accent)}
+  .level.locked{opacity:.5;cursor:not-allowed}
+  .level input{position:absolute;opacity:0;pointer-events:none}
+  .level:focus-within{outline:2px solid var(--sel);outline-offset:2px}
+  .level .name{font-weight:600;font-size:14px}
+  .level .time{font-family:var(--mono);font-size:12px;color:var(--accent);margin-top:3px;
+    white-space:nowrap}
+  .level .time.unknown,.level .time.lockword{color:var(--faint)}
+  .lockreason{margin-top:10px;font-family:var(--mono);font-size:12px;color:#f0c98a;
+    background:rgba(242,193,78,.08);border:1px solid rgba(242,193,78,.3);border-radius:7px;
+    padding:9px 12px}
+  .leveldetail{margin-top:12px;border:1px solid var(--line);border-radius:8px;
+    background:var(--panel-2);padding:13px 15px}
+  .leveldetail .dhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  .leveldetail .dname{font-weight:600;font-size:14.5px}
+  .leveldetail .dtime{font-family:var(--mono);font-size:12.5px;color:var(--accent);margin-left:auto}
+  .leveldetail .uses{margin-top:8px;font-size:13.5px}
+  .leveldetail .for{margin-top:4px;color:var(--muted);font-size:13px}
+  .ledger{margin:10px 0 0;padding:0;list-style:none;font-size:13px}
+  .ledger li{display:flex;gap:8px;margin-top:4px;line-height:1.5}
+  .ledger .mark{flex:none;width:1em;font-weight:700;font-family:var(--mono)}
+  .ledger .pro .mark{color:var(--ok)}
+  .ledger .con .mark{color:var(--bad)}
+  .ledger li span:last-child{color:var(--muted)}
+
+  /* The two extra stages sit side by side. Under a level that cannot run them
+     they fold to one line saying why; the moment they can be ticked, their
+     full description - drawbacks included - is back. */
+  #qualityOptions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;
+    align-items:start}
+  .option{border:1px solid var(--line);border-radius:8px;padding:11px 14px;
+    background:var(--inset)}
+  .option .offnote{display:none;margin-top:4px;font-family:var(--mono);font-size:11.5px;
+    color:var(--faint)}
+  .option.off .uses,.option.off .ledger{display:none}
+  .option.off .offnote{display:block}
+  .option-head{display:flex;align-items:baseline;gap:9px}
+  .option-head input{width:auto;margin:0;flex:none;accent-color:var(--accent)}
+  .option-head label{font-size:13.5px;font-weight:600;color:var(--text);cursor:pointer}
+  .option-head .time{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--muted);
+    white-space:nowrap}
+  .option .uses{margin-top:6px;color:var(--text);font-size:13px}
+  .option.off{opacity:.45}
+  .basis{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+
+  /* ---- job table ---- */
+  .table-wrap{overflow-x:auto}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid #1f1f1f;font-size:13px}
+  th{font-family:var(--mono);color:var(--faint);font-weight:600;font-size:10.5px;
+    text-transform:uppercase;letter-spacing:1px;white-space:nowrap}
+  tbody tr:hover td{background:#181818}
+  .status{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;
+    padding:3px 10px;border:1px solid var(--line);border-radius:999px;color:var(--muted);
+    background:#111;white-space:nowrap}
+  .status .dot{width:6px;height:6px}
+  .status-running{color:var(--accent);border-color:rgba(255,153,0,.4)}
+  .status-done{color:var(--text)}
+  .status-failed{color:var(--bad);border-color:rgba(224,87,78,.4)}
+  .status-canceled{color:var(--faint)}
+  .job-actions{white-space:nowrap}
+  .job-actions .btn{min-height:28px}
+  .job-actions .btn + .btn{margin-left:6px}
   /* Queue order is edited in place, so the rows have to look draggable before
      anyone tries it: a grip, a grab cursor, and a gap where the row will land. */
-  tr.queued-row { cursor: grab; }
-  tr.queued-row.dragging { opacity: .4; cursor: grabbing; }
-  tr.queued-row.dragging td { background: var(--accent-dim); }
-  td.pos { white-space: nowrap; color: var(--muted); width: 1%; user-select: none; }
-  td.pos .grip { color: #4b515e; margin-right: 6px; letter-spacing: -1px; }
-  tr.queued-row:hover td.pos .grip { color: var(--accent); }
-  td.pos .next { color: var(--accent); font-weight: 650; }
-  .move button { padding: 3px 7px; font-size: 12px; min-height: 30px; }
-  .bar { position: relative; height: 7px; background: #0c0e13; border: 1px solid var(--border);
-         border-radius: 4px; overflow: hidden; min-width: 130px; }
-  .bar > span { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  tr.queued-row{cursor:grab}
+  tr.queued-row.dragging{opacity:.4;cursor:grabbing}
+  tr.queued-row.dragging td{background:rgba(255,153,0,.07)}
+  td.pos{white-space:nowrap;color:var(--muted);width:1%;user-select:none;font-family:var(--mono)}
+  td.pos .grip{color:#3a3a3a;margin-right:6px;letter-spacing:-1px}
+  tr.queued-row:hover td.pos .grip{color:var(--accent)}
+  td.pos .next{color:var(--accent);font-weight:600}
+  .bar{position:relative;height:8px;background:var(--inset);border:1px solid var(--line);
+    border-radius:5px;overflow:hidden;min-width:130px}
+  .bar>span{display:block;height:100%;background:linear-gradient(90deg,#ff9900,#ffb347);
+    border-radius:4px}
   /* The scene-detection pre-pass reports no total, so there is no honest
      percentage to draw - show motion instead of a made-up width. */
-  .bar.indeterminate > span { width: 35%; animation: slide 1.4s ease-in-out infinite; }
-  @keyframes slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
-  .progress-meta { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
-  td.eta { white-space: nowrap; }
-  td.eta .approx { color: var(--muted); }
-  td.path { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #queueSummary { color: var(--muted); font-size: 12px; text-transform: none;
-                  letter-spacing: 0; font-weight: 400; }
-  #queueHint { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; }
-  #log { background: #07090c; border: 1px solid var(--border); border-radius: var(--r-sm);
-         padding: var(--s3); height: 320px; overflow: auto; margin-top: var(--s4);
-         font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
-         white-space: pre-wrap; display: none; }
+  .bar.indeterminate>span{width:35%;animation:slide 1.4s ease-in-out infinite}
+  @keyframes slide{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}
+  .progress-meta{font-family:var(--mono);color:var(--muted);font-size:11px;margin-top:4px}
+  td.eta{white-space:nowrap;font-family:var(--mono);font-size:12.5px}
+  td.eta .approx{color:var(--muted)}
+  td.path{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-family:var(--mono);font-size:12.5px}
+  #queueSummary{font-family:var(--mono);font-size:11px;color:var(--faint);text-transform:none;
+    letter-spacing:0}
+  #log{background:var(--inset);border:1px solid var(--line);border-radius:8px;
+    padding:12px;height:320px;overflow:auto;margin-top:14px;
+    font-family:var(--mono);font-size:12px;white-space:pre-wrap;display:none;color:var(--muted)}
 
-  /* --- phone ------------------------------------------------------------ */
+  /* ---- phone ---- */
   /* The table becomes one card per job. No JS involved, so the queue logic
-     above cannot break on a narrow screen - only its presentation changes. */
-  @media (max-width: 860px) {
-    main { padding: var(--s3); gap: var(--s3); grid-template-columns: 1fr; }
-    header { padding: var(--s3) var(--s4); }
-    .banner { margin: 0 var(--s3); }
-    .panel { padding: var(--s3); }
-    thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
-    table, tbody, tr, td { display: block; width: 100%; }
-    tr { border: 1px solid var(--border); border-radius: var(--r-sm);
-         margin-bottom: var(--s3); padding: var(--s2) 0; background: var(--raised); }
-    td { border-bottom: 0; padding: 4px var(--s3); display: flex; gap: var(--s3);
-         align-items: baseline; }
-    td::before { content: attr(data-label); color: var(--muted); font-size: 11px;
-                 text-transform: uppercase; letter-spacing: .06em; flex: none;
-                 width: 84px; }
-    td:empty { display: none; }
-    td.path { max-width: none; white-space: normal; word-break: break-all; }
-    .job-actions { flex-wrap: wrap; white-space: normal; }
-    #queueHint { display: none; }   /* dragging is a mouse gesture; the buttons stay */
+     cannot break on a narrow screen - only its presentation changes. */
+  @media (max-width:880px){
+    .wrap{grid-template-columns:1fr;padding:14px 12px 60px}
+    .rail{display:none}
+    header{padding:12px 14px}
+    .banner{margin:12px 14px 0}
+    .pbody{padding:14px}
+    .grid2,.grid3,#qualityOptions{grid-template-columns:1fr}
+    thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+    table,tbody,tr,td{display:block;width:100%}
+    tr{border:1px solid var(--line);border-radius:8px;margin-bottom:12px;
+       padding:6px 0;background:var(--panel-2)}
+    td{border-bottom:0;padding:4px 12px;display:flex;gap:12px;align-items:baseline}
+    td::before{content:attr(data-label);font-family:var(--mono);color:var(--faint);font-size:10.5px;
+       text-transform:uppercase;letter-spacing:1px;flex:none;width:84px}
+    td:empty{display:none}
+    td.path{max-width:none;white-space:normal;word-break:break-all}
+    .job-actions{flex-wrap:wrap;white-space:normal}
+    .phead .hint{display:none}   /* dragging is a mouse gesture; the buttons stay */
   }
 </style>
 </head>
 <body>
 <header>
-  <h1>iw3</h1>
-  <span class="sub">2D &rarr; stereo-3D batch converter<span id="deviceLabel"></span></span>
+  <div class="brand">
+    <span class="logo"><span class="w">iw</span><span class="b">3</span></span>
+    <span class="sub">stereo conversion bench</span>
+  </div>
+  <div class="pills">
+    <span class="pill"><span class="dot" id="dot-dev"></span> <span id="devLabel">device</span></span>
+    <span class="pill"><span class="dot" id="dot-chain"></span> <span id="chainLabel">pipeline</span></span>
+    <span class="pill"><span class="dot" id="dot-queue"></span> <span id="queueLabel">queue</span></span>
+  </div>
 </header>
 <div id="deviceBanner" class="banner" hidden></div>
-<main>
-  <div class="panel">
-    <h2>1 &middot; Source</h2>
-    <div id="browser"></div>
-    <div id="selectedPath">No file or folder selected.</div>
-    <div class="checkbox-row">
-      <input type="checkbox" id="recursive">
-      <label for="recursive">Process a whole folder, recursively</label>
-    </div>
-  </div>
 
-  <div class="panel">
-    <h2>2 &middot; Quality level</h2>
-    <div id="qualityLevels"></div>
-    <div id="qualityOptions"></div>
-    <div id="estimateBasis" class="help"></div>
-    <label for="stereoFormat">Stereo format</label>
-    <select id="stereoFormat"></select>
-    <div id="settingsForm"></div>
-  </div>
+<div class="wrap">
+  <nav class="rail">
+    <ol>
+      <li class="step active" id="rstep1" data-target="p1"><span class="node"><span>1</span></span>
+        <div class="k">select</div><div class="t">Pick a source</div></li>
+      <li class="step" id="rstep2" data-target="p2"><span class="node"><span>2</span></span>
+        <div class="k">quality</div><div class="t">Choose the recipe</div></li>
+      <li class="step" id="rstep3" data-target="p3"><span class="node"><span>3</span></span>
+        <div class="k">run</div><div class="t">Convert or preview</div></li>
+      <li class="step" id="rstep4" data-target="p4"><span class="node"><span>4</span></span>
+        <div class="k">queue</div><div class="t">Watch the jobs</div></li>
+    </ol>
+  </nav>
 
-  <div class="panel full">
-    <h2>3 &middot; Run it</h2>
-    <div class="actions">
-      <button id="btnConvert">Convert the whole file</button>
-      <button id="btnPreview" class="secondary">Preview one minute</button>
-    </div>
-    <label for="windowMode">Which minute to preview</label>
-    <div class="row">
-      <select id="windowMode">
-        <option value="auto">Pick it automatically</option>
-        <option value="manual">Start at a time I choose</option>
-      </select>
-      <input type="text" id="windowStart" placeholder="mm:ss or seconds" hidden>
-    </div>
-    <div id="windowHelp" class="help"></div>
-  </div>
+  <main class="col">
+    <!-- STEP 1 -->
+    <section class="panel" id="p1">
+      <div class="phead"><span class="idx">01</span><h2>Select source</h2>
+        <span class="hint">under /input</span></div>
+      <div class="pbody">
+        <div class="crumbs" id="crumbs"></div>
+        <div class="list" id="browser"><div class="empty">Loading…</div></div>
+        <div class="selbar none" id="selbar">
+          <span class="lab">selected</span>
+          <span class="val" id="selVal">nothing yet — click a file, or open a folder and choose “select this folder”.</span>
+        </div>
+        <div class="checkline">
+          <input type="checkbox" id="recursive">
+          <label for="recursive">Process a whole folder, recursively</label>
+        </div>
+      </div>
+    </section>
 
-  <div class="panel full" id="comparePanel" hidden>
-    <h2>Compare two previews in one file</h2>
-    <div class="help" id="compareIntro"></div>
-    <div class="row" style="margin-top:var(--s3);flex-wrap:wrap">
-      <div><label for="cmpA">A</label><select id="cmpA"></select></div>
-      <div><label for="cmpB">B</label><select id="cmpB"></select></div>
-      <div><label for="cmpLayout">Arrangement</label><select id="cmpLayout"></select></div>
-    </div>
-    <div id="compareHelp" class="help"></div>
-    <div class="actions" style="margin-top:var(--s4)">
-      <button id="btnCompare" class="secondary">Build the comparison</button>
-    </div>
-  </div>
+    <!-- STEP 2 -->
+    <section class="panel" id="p2">
+      <div class="phead"><span class="idx">02</span><h2>Quality level</h2>
+        <span class="hint" id="qualityHint">measured recipes, not presets</span></div>
+      <div class="pbody">
+        <div class="levels" id="qualityLevels"></div>
+        <div id="lockReason" class="lockreason" hidden></div>
+        <div id="levelDetail" class="leveldetail" hidden></div>
+        <div id="qualityOptions"></div>
+        <div id="estimateBasis" class="note basis"></div>
+        <div class="field">
+          <label for="stereoFormat">Stereo format</label>
+          <select id="stereoFormat"></select>
+        </div>
+        <div id="settingsForm" class="grid2"></div>
+      </div>
+    </section>
 
-  <div class="panel full">
-    <h2>Job queue <span id="queueSummary"></span>
-      <span id="queueHint" class="help">drag a waiting row to reorder &middot; &#10514; run next &middot; &#10515; run last</span></h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th title="Drag a waiting row to reorder it">#</th><th>Created</th><th>Mode</th><th>Quality</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
-        <tbody id="jobRows"></tbody>
-      </table>
-    </div>
-    <div id="log"></div>
-  </div>
-</main>
+    <!-- STEP 3 -->
+    <section class="panel" id="p3">
+      <div class="phead"><span class="idx">03</span><h2>Run it</h2></div>
+      <div class="pbody">
+        <div class="actions">
+          <button class="btn" id="btnConvert">Convert the whole file</button>
+          <button class="btn ghost" id="btnPreview">Preview one minute</button>
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="windowMode">Which minute to preview</label>
+            <select id="windowMode">
+              <option value="auto">Pick it automatically</option>
+              <option value="manual">Start at a time I choose</option>
+            </select>
+          </div>
+          <div class="field" id="windowStartField" hidden>
+            <label for="windowStart">Start at</label>
+            <input type="text" id="windowStart" placeholder="mm:ss or seconds">
+          </div>
+        </div>
+        <div id="windowHelp" class="help"></div>
+      </div>
+    </section>
+
+    <!-- COMPARE (only when there are two previews to compare) -->
+    <section class="panel" id="comparePanel" hidden>
+      <div class="phead"><span class="idx">··</span><h2>Compare two previews in one file</h2>
+        <span class="hint">runs beside the queue</span></div>
+      <div class="pbody">
+        <div class="help" id="compareIntro"></div>
+        <div class="grid2 grid3">
+          <div class="field"><label for="cmpA">A</label><select id="cmpA"></select></div>
+          <div class="field"><label for="cmpB">B</label><select id="cmpB"></select></div>
+          <div class="field"><label for="cmpLayout">Arrangement</label><select id="cmpLayout"></select></div>
+        </div>
+        <div id="compareHelp" class="help"></div>
+        <div class="actions" style="margin-top:14px">
+          <button class="btn ghost" id="btnCompare">Build the comparison</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 4 -->
+    <section class="panel" id="p4">
+      <div class="phead"><span class="idx">04</span><h2>Job queue</h2>
+        <span id="queueSummary"></span>
+        <span class="hint">drag a waiting row to reorder · ⤒ run next · ⤓ run last</span></div>
+      <div class="pbody">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th title="Drag a waiting row to reorder it">#</th><th>Created</th><th>Mode</th><th>Quality</th><th>Input</th><th>Format</th><th>Status</th><th>Progress</th><th>ETA</th><th></th></tr></thead>
+            <tbody id="jobRows"></tbody>
+          </table>
+        </div>
+        <div id="log"></div>
+      </div>
+    </section>
+  </main>
+</div>
 
 <script>
 const API = "/api";
@@ -320,14 +432,42 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-// --- Device ------------------------------------------------------------
+// tqdm hands us seconds; show them the way a person reads a wait.
+function fmtDuration(sec) {
+  if (sec === null || sec === undefined) return "—";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
+// --- Rail --------------------------------------------------------------
+function setStep(active, done) {
+  [1, 2, 3, 4].forEach(n => {
+    const el = document.getElementById("rstep" + n);
+    el.classList.toggle("active", n === active);
+    el.classList.toggle("done", done.includes(n));
+  });
+}
+document.querySelectorAll(".step").forEach(s => s.addEventListener("click", () => {
+  const t = document.getElementById(s.dataset.target);
+  if (t) t.scrollIntoView({ behavior: "smooth", block: "start" });
+}));
+
+// --- Device pill -------------------------------------------------------
 let health = null;
 async function loadHealth() {
-  try { health = await api("/health"); } catch (e) { return; }
-  const label = document.getElementById("deviceLabel");
-  const dev = health.device === "cpu" ? "CPU" : health.device.toUpperCase();
+  const dot = document.getElementById("dot-dev");
+  try { health = await api("/health"); }
+  catch (e) { dot.className = "dot bad"; return; }
+  const dev = health.device === "cpu" ? "cpu" : health.device;
   const count = (health.accelerators?.[health.device]?.devices) || 0;
-  label.textContent = ` · ${dev}${count > 1 ? ` ×${count}` : ""} · torch ${health.torch}`;
+  document.getElementById("devLabel").textContent =
+    dev + (count > 1 ? ` ×${count}` : "");
+  dot.className = "dot " + (health.device === "cpu" ? "warn" : "ok");
+  dot.parentElement.title = `torch ${health.torch}` +
+    (health.hardware_encode ? " · hardware encode ok" : " · software encode");
   if (health.warning) {
     const banner = document.getElementById("deviceBanner");
     banner.textContent = "Running on the CPU. " + health.warning;
@@ -335,45 +475,90 @@ async function loadHealth() {
   }
 }
 
-// --- File browser -----------------------------------------------------
+// --- File browser ------------------------------------------------------
+// Folders open on a click; the folder itself is selected via the pinned
+// "select this folder" row, so no gesture does two jobs at once.
 async function loadBrowser(path) {
   currentBrowsePath = path;
-  const data = await api("/browse?path=" + encodeURIComponent(path));
   const el = document.getElementById("browser");
+  el.innerHTML = '<div class="empty">Loading…</div>';
+  let data;
+  try { data = await api("/browse?path=" + encodeURIComponent(path)); }
+  catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; return; }
+  currentBrowsePath = data.path;
+  renderCrumbs(data.path);
   el.innerHTML = "";
   if (data.path) {
-    const up = document.createElement("div");
-    up.className = "entry";
-    up.innerHTML = `<span class="icon">↰</span> ..`;
-    up.onclick = () => loadBrowser(data.path.split("/").slice(0, -1).join("/"));
-    el.appendChild(up);
+    const pick = document.createElement("div");
+    pick.className = "row dir";
+    pick.innerHTML = '<span class="ico">▣</span><span class="nm">Select this folder</span>' +
+      '<span class="pick">select ▸</span>';
+    pick.onclick = () => selectEntry({ path: data.path, name: data.path.split("/").pop(), type: "dir" });
+    el.appendChild(pick);
   }
   for (const entry of data.entries) {
     const row = document.createElement("div");
-    row.className = "entry";
-    row.innerHTML = `<span class="icon">${entry.type === "dir" ? "📁" : "🎬"}</span> ${esc(entry.name)}`;
-    row.onclick = (e) => {
-      if (entry.type === "dir" && e.detail === 2) { loadBrowser(entry.path); return; }
-      document.querySelectorAll(".entry.selected").forEach(x => x.classList.remove("selected"));
-      row.classList.add("selected");
-      selected = entry;
-      document.getElementById("selectedPath").textContent = "/input/" + entry.path
-        + (entry.type === "dir" ? "  (double-click to open, single-click selects the folder itself)" : "");
-      // The quality levels quote a time for *this* file, so they have to be
-      // recomputed the moment the file changes.
-      if (quality) refreshEstimates();
+    row.className = "row " + (entry.type === "dir" ? "dir" : "file");
+    row.dataset.path = entry.path;
+    row.innerHTML = `<span class="ico">${entry.type === "dir" ? "▸" : "◆"}</span>` +
+      `<span class="nm">${esc(entry.name)}</span>` +
+      (entry.type === "file" ? '<span class="pick">select ▸</span>' : "");
+    row.onclick = () => {
+      if (entry.type === "dir") { loadBrowser(entry.path); return; }
+      selectEntry(entry);
     };
     el.appendChild(row);
   }
+  if (!data.entries.length && !data.path) {
+    el.innerHTML = '<div class="empty">No folders or video files here.</div>';
+  }
+  markSelected();
 }
 
-// --- Quality levels -----------------------------------------------------
+function renderCrumbs(path) {
+  const c = document.getElementById("crumbs");
+  const parts = ['<button onclick="loadBrowser(\'\')">input</button>'];
+  let acc = "";
+  for (const seg of (path || "").split("/").filter(Boolean)) {
+    acc += (acc ? "/" : "") + seg;
+    const safe = acc.replace(/'/g, "\\'");
+    parts.push('<span class="sep">/</span>');
+    parts.push(acc === path
+      ? '<span style="color:var(--text)">' + esc(seg) + '</span>'
+      : '<button onclick="loadBrowser(\'' + safe + '\')">' + esc(seg) + '</button>');
+  }
+  c.innerHTML = parts.join("");
+}
+
+function markSelected() {
+  document.querySelectorAll(".row.selected").forEach(r => r.classList.remove("selected"));
+  if (!selected) return;
+  document.querySelectorAll(".row[data-path]").forEach(r => {
+    if (r.dataset.path === selected.path) r.classList.add("selected");
+  });
+}
+
+function selectEntry(entry) {
+  selected = entry;
+  const bar = document.getElementById("selbar");
+  bar.classList.remove("none");
+  document.getElementById("selVal").textContent =
+    (entry.type === "dir" ? "[folder] " : "[file] ") + "/input/" + entry.path;
+  markSelected();
+  setStep(2, [1]);
+  // The quality levels quote a time for *this* file, so they have to be
+  // recomputed the moment the file changes.
+  if (quality) refreshEstimates();
+}
+
+// --- Quality levels ----------------------------------------------------
 // The levels are measured recipes; the switches are extra stages. What the UI
 // has to get right is the price tag: the measurements were taken on one
 // 12-minute file, so the server recomputes every figure for the frame count of
 // the selected source and the page shows which file it is quoting.
 let quality = null;          // /api/quality
 let currentLevel = "custom";
+let lastEstimates = null;    // {est, pre} from the last /estimate round
 
 function selectedOptions() {
   return {
@@ -397,24 +582,30 @@ function renderQuality() {
   box.innerHTML = "";
   for (const lv of quality.levels) {
     const el = document.createElement("label");
-    el.className = "level" + (lv.available ? "" : " disabled");
+    el.className = "level" + (lv.available ? "" : " locked");
     el.dataset.id = lv.id;
+    el.title = lv.available ? (lv.good_for || "") : (lv.unavailable_reason || "");
     el.innerHTML = `
-      <span class="level-head">
-        <input type="radio" name="quality" value="${lv.id}"
-               ${lv.id === currentLevel ? "checked" : ""}
-               ${lv.available ? "" : "disabled"}>
-        <span class="name">${esc(lv.label)}</span>
-        <span class="time" id="t_${lv.id}">—</span>
-      </span>
-      ${lv.available ? "" : `<div class="blocked">${esc(lv.unavailable_reason)}</div>`}
-      <div class="uses">${esc(lv.uses || "")}</div>
-      ${lv.good_for ? `<div class="for">Good for: ${esc(lv.good_for)}</div>` : ""}
-      ${ledger(lv.pros, lv.cons)}`;
+      <input type="radio" name="quality" value="${lv.id}"
+             ${lv.id === currentLevel ? "checked" : ""}
+             ${lv.available ? "" : "disabled"}>
+      <div class="name">${esc(lv.label)}</div>
+      <div class="time ${lv.available ? "" : "lockword"}" id="t_${lv.id}">${lv.available ? "—" : "locked"}</div>`;
     el.querySelector("input").onchange = () => { currentLevel = lv.id; applyLevel(); };
     box.appendChild(el);
   }
 
+  // The chain levels are locked for one shared reason; say it once, in full.
+  const lockedLv = quality.levels.filter(lv => !lv.available);
+  const lockEl = document.getElementById("lockReason");
+  lockEl.hidden = !lockedLv.length;
+  if (lockedLv.length) {
+    lockEl.textContent = lockedLv.map(lv => lv.label).join(" and ")
+      + (lockedLv.length > 1 ? " are" : " is") + " locked: "
+      + lockedLv[0].unavailable_reason;
+  }
+
+  const chainNames = quality.levels.filter(lv => lv.chain).map(lv => lv.label).join(" or ");
   const opts = document.getElementById("qualityOptions");
   opts.innerHTML = quality.options.map(op => `
     <div class="option" id="row_${op.id}">
@@ -423,6 +614,7 @@ function renderQuality() {
         <label for="opt_${op.id}">${esc(op.label)}</label>
         <span class="time" id="t_opt_${op.id}">—</span>
       </div>
+      <div class="offnote">${op.chain_only ? `only with ${esc(chainNames)}` : "not available at this level"}</div>
       <div class="uses">${esc(op.uses || "")}</div>
       ${ledger(op.pros, op.cons)}
     </div>`).join("");
@@ -439,6 +631,16 @@ function renderQuality() {
   const layouts = document.getElementById("cmpLayout");
   layouts.innerHTML = quality.compare_layouts
     .map(l => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
+
+  // Header pill: is the multi-stage pipeline reachable from this container?
+  const dot = document.getElementById("dot-chain");
+  dot.className = "dot " + (quality.chain_available ? "ok" : "warn");
+  document.getElementById("chainLabel").textContent =
+    quality.chain_available ? "pipeline" : "pipeline off";
+  dot.parentElement.title = quality.chain_available
+    ? "Multi-stage pipeline available: " + quality.chain_script
+    : (lockedLv[0]?.unavailable_reason || "pipeline not available");
+
   applyLevel();
 }
 
@@ -447,6 +649,7 @@ function applyLevel() {
   for (const el of document.querySelectorAll(".level")) {
     el.classList.toggle("checked", el.dataset.id === currentLevel);
   }
+  renderLevelDetail(lv);
   // The twelve iw3 settings belong to the level that is defined by them.
   // Under a named level they would look editable and be ignored.
   document.getElementById("settingsForm").hidden = !lv.settings_form;
@@ -461,6 +664,35 @@ function applyLevel() {
   refreshEstimates();
 }
 
+function renderLevelDetail(lv) {
+  const d = document.getElementById("levelDetail");
+  if (!lv.id) { d.hidden = true; return; }
+  d.hidden = false;
+  d.innerHTML = `
+    <div class="dhead">
+      <span class="dname">${esc(lv.label)}</span>
+      <span class="dtime" id="detailTime"></span>
+    </div>
+    <div class="uses">${esc(lv.uses || "")}</div>
+    ${lv.good_for ? `<div class="for">Good for: ${esc(lv.good_for)}</div>` : ""}
+    ${ledger(lv.pros, lv.cons)}`;
+  fillDetailTime();
+}
+
+function fillDetailTime() {
+  const cell = document.getElementById("detailTime");
+  if (!cell || !lastEstimates) return;
+  const v = lastEstimates.est.levels[currentLevel];
+  const p = lastEstimates.pre.levels[currentLevel];
+  if (!v || v.seconds === null) { cell.textContent = "not modelled — estimated from this machine's own throughput"; return; }
+  const mark = v.extrapolated ? "≈ " : "~ ";
+  cell.textContent = mark + "full run " + fmtDuration(v.seconds)
+    + (p && p.seconds !== null ? ` · preview ${fmtDuration(p.seconds)}` : "");
+  cell.title = (v.extrapolated
+    ? "Extrapolated from HD measurements by this machine's own HD:4K rate ratio - no level has been measured on a 4K source. "
+    : "") + ((quality.levels.find(l => l.id === currentLevel) || {}).notes || "");
+}
+
 async function refreshEstimates() {
   const o = selectedOptions();
   const path = (selected && selected.type === "file") ? selected.path : "";
@@ -470,17 +702,17 @@ async function refreshEstimates() {
   try {
     [est, pre] = await Promise.all([api("/estimate?" + q), api("/estimate?" + qp)]);
   } catch (e) { return; }
+  lastEstimates = { est, pre };
 
   for (const lv of quality.levels) {
     const cell = document.getElementById(`t_${lv.id}`);
-    const v = est.levels[lv.id], p = pre.levels[lv.id];
+    if (!lv.available) continue;
+    const v = est.levels[lv.id];
     if (!v || v.seconds === null) {
       cell.textContent = "not modelled";
       cell.className = "time unknown";
     } else {
-      const mark = v.extrapolated ? "≈ " : "~ ";
-      cell.textContent = mark + fmtDuration(v.seconds)
-        + (p && p.seconds !== null ? ` · preview ${fmtDuration(p.seconds)}` : "");
+      cell.textContent = (v.extrapolated ? "≈ " : "~ ") + fmtDuration(v.seconds);
       cell.className = "time";
       cell.title = (v.extrapolated
         ? "Extrapolated from HD measurements by this machine's own HD:4K rate ratio - no level has been measured on a 4K source. "
@@ -492,6 +724,7 @@ async function refreshEstimates() {
     cell.textContent = "+ " + fmtDuration(est.options[op.id].seconds);
     cell.title = op.notes || "";
   }
+  fillDetailTime();
   const w = pre.preview_window;
   document.getElementById("estimateBasis").innerHTML =
     `Times for <strong>${est.frames.toLocaleString()} frames</strong> (${esc(est.basis)}`
@@ -502,7 +735,7 @@ async function refreshEstimates() {
          + `frames, ${pre.preview_share}%</strong> of the file.` : "");
 }
 
-// --- Preview window -----------------------------------------------------
+// --- Preview window ----------------------------------------------------
 function parseTime(text) {
   const t = (text || "").trim();
   if (!t) return null;
@@ -512,10 +745,10 @@ function parseTime(text) {
 }
 
 document.getElementById("windowMode").onchange = (e) => {
-  document.getElementById("windowStart").hidden = e.target.value !== "manual";
+  document.getElementById("windowStartField").hidden = e.target.value !== "manual";
 };
 
-// --- Settings form ------------------------------------------------------
+// --- Settings form (custom level only) ---------------------------------
 function renderSettingsForm() {
   const sel = document.getElementById("stereoFormat");
   sel.innerHTML = schema.stereo_formats.map(f => `<option value="${f.value}">${esc(f.label)}</option>`).join("");
@@ -525,26 +758,29 @@ function renderSettingsForm() {
   for (const f of schema.fields) {
     const wrap = document.createElement("div");
     if (f.kind === "bool") {
-      wrap.className = "checkbox-row";
+      wrap.className = "checkline";
       wrap.innerHTML = `<input type="checkbox" id="f_${f.dest}" ${f.default ? "checked" : ""}>
         <label for="f_${f.dest}">${esc(f.label)}</label>`;
     } else if (f.kind === "select") {
+      wrap.className = "field";
       wrap.innerHTML = `<label for="f_${f.dest}">${esc(f.label)}</label>
         <select id="f_${f.dest}">${(f.choices || []).map(c =>
           `<option value="${c ?? ''}" ${c === f.default ? "selected" : ""}>${c ?? '(auto)'}</option>`).join("")}</select>`;
     } else if (f.kind === "int_pair") {
       const d = f.default || [0, 0];
+      wrap.className = "field";
       wrap.innerHTML = `<label>${esc(f.label)}</label>
-        <div class="row">
+        <div style="display:flex;gap:10px">
           <input type="number" id="f_${f.dest}_x" value="${d[0]}">
           <input type="number" id="f_${f.dest}_y" value="${d[1]}">
         </div>`;
     } else {
+      wrap.className = "field";
       wrap.innerHTML = `<label for="f_${f.dest}">${esc(f.label)}</label>
         <input type="number" id="f_${f.dest}" value="${f.default ?? 0}"
           min="${f.min ?? ''}" max="${f.max ?? ''}" step="${f.step ?? 1}">`;
     }
-    if (f.help) wrap.innerHTML += `<div class="help">${esc(f.help)}</div>`;
+    if (f.help) wrap.innerHTML += `<div class="help" style="grid-column:1/-1">${esc(f.help)}</div>`;
     container.appendChild(wrap);
   }
 }
@@ -568,7 +804,7 @@ function collectParams() {
   return params;
 }
 
-// --- Job submission -------------------------------------------------
+// --- Job submission ----------------------------------------------------
 async function submitJob(mode) {
   if (!selected) { alert("Select a file or folder first."); return; }
   const lv = quality.levels.find(l => l.id === currentLevel) || {};
@@ -601,6 +837,7 @@ async function submitJob(mode) {
     alert("Could not queue the job:\n\n" + e.message);
     return;
   }
+  setStep(4, [1, 2, 3]);
   refreshJobs();
 }
 document.getElementById("btnConvert").onclick = () => submitJob("convert");
@@ -672,22 +909,14 @@ document.getElementById("btnCompare").onclick = async () => {
   refreshJobs();
 };
 
-// --- Job queue table --------------------------------------------------
+// --- Job queue table ---------------------------------------------------
 let openLogJobId = null;
 let logEventSource = null;
 
-// tqdm hands us seconds; show them the way a person reads a wait.
-function fmtDuration(sec) {
-  if (sec === null || sec === undefined) return "—";
-  sec = Math.round(sec);
-  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
-  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
-  if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
-  return `${s}s`;
-}
-
 const STATUS_WORD = { queued: "waiting", running: "running", done: "done",
                       failed: "failed", canceled: "canceled" };
+const STATUS_DOT = { queued: "", running: "run", done: "ok",
+                     failed: "bad", canceled: "" };
 
 // The level a job ran at, plus its switches. Jobs from before the levels
 // existed carry 'custom', which is what they were.
@@ -702,12 +931,12 @@ function qualityCell(j) {
   if (j.opt_flow) bits.push("flow");
   if (j.opt_upscale) bits.push("4K");
   return esc(lv ? lv.label : (j.quality || "custom"))
-    + (bits.length ? ` <span class="help" style="display:inline">+${bits.join(" +")}</span>` : "");
+    + (bits.length ? ` <span style="color:var(--faint);font-size:11px">+${bits.join(" +")}</span>` : "");
 }
 
 function progressCell(j) {
   if (j.status === "done") {
-    return `<div class="bar"><span style="width:100%;background:var(--ok)"></span></div>`;
+    return `<div class="bar"><span style="width:100%"></span></div>`;
   }
   if (j.status !== "running") return "";
   const p = j.progress;
@@ -739,7 +968,7 @@ function progressCell(j) {
   const scene = p.phase === "scene_detect";
   const bar = p.percent === null
     ? `<div class="bar indeterminate"><span></span></div>`
-    : `<div class="bar"><span style="width:${p.percent}%${scene ? ';background:var(--muted)' : ''}"></span></div>`;
+    : `<div class="bar"><span style="width:${p.percent}%${scene ? ';background:var(--faint)' : ''}"></span></div>`;
   const parts = [];
   if (scene) parts.push("scene detection");
   if (p.percent !== null) parts.push(`${p.percent}%`);
@@ -759,12 +988,18 @@ function etaCell(j) {
     : text;
 }
 
-async function refreshQueueSummary() {
+async function refreshQueueSummary(jobs) {
   const el = document.getElementById("queueSummary");
+  const running = jobs.some(j => j.status === "running");
+  const active = jobs.filter(j => j.status === "running" || j.status === "queued").length;
+  const qd = document.getElementById("dot-queue");
+  qd.className = "dot" + (running ? " run" : "");
+  document.getElementById("queueLabel").textContent =
+    active ? `queue · ${active}` : "queue idle";
   try {
     const q = await api("/queue-eta");
     if (!q.jobs) { el.textContent = ""; return; }
-    let text = `· ${q.jobs} active`;
+    let text = `${q.jobs} active`;
     if (q.total_sec !== null) {
       text += ` · ${q.exact ? "" : "~"}${fmtDuration(q.total_sec)} remaining`;
     }
@@ -777,7 +1012,7 @@ async function refreshQueueSummary() {
   }
 }
 
-// --- Queue reordering ---------------------------------------------------
+// --- Queue reordering --------------------------------------------------
 // Native HTML5 drag and drop, no library: the row follows the pointer, and the
 // server is told the resulting order once, on drop.
 const drag = { id: null, dropped: false };
@@ -872,7 +1107,7 @@ async function refreshJobs() {
       <td data-label="Quality">${qualityCell(j)}</td>
       <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? j.output_path.split("/").pop() : j.input_path)}</td>
       <td data-label="Format">${esc(j.stereo_format)}</td>
-      <td data-label="Status"><span class="status status-${j.status}" title="${esc(j.error || "")}">${STATUS_WORD[j.status] || j.status}</span></td>
+      <td data-label="Status"><span class="status status-${j.status}" title="${esc(j.error || "")}"><span class="dot ${STATUS_DOT[j.status] || ""}"></span>${STATUS_WORD[j.status] || j.status}</span></td>
       <td data-label="Progress">${progressCell(j)}</td>
       <td class="eta" data-label="ETA">${etaCell(j)}</td>
       <td class="job-actions" data-label=""></td>
@@ -904,39 +1139,37 @@ async function refreshJobs() {
       // feature was asked for, and "run this next" should not require holding
       // the mouse down while the page scrolls. It is also the only way to
       // reorder on a phone, where HTML5 drag and drop does not exist.
-      const move = document.createElement("span");
-      move.className = "move";
       for (const [label, to, title] of [["⤒", "top", "Run next"],
                                          ["⤓", "bottom", "Run last"]]) {
         const b = document.createElement("button");
+        b.className = "btn ghost sm";
         b.textContent = label;
         b.title = title;
         b.onclick = () => moveJob(j.id, to);
-        move.appendChild(b);
+        actions.appendChild(b);
       }
-      actions.appendChild(move);
     }
     const logBtn = document.createElement("button");
-    logBtn.className = "secondary";
+    logBtn.className = "btn ghost sm";
     logBtn.textContent = "Log";
     logBtn.onclick = () => showLog(j.id);
     actions.appendChild(logBtn);
     if (j.status === "queued" || j.status === "running") {
       const cancelBtn = document.createElement("button");
-      cancelBtn.className = "danger";
+      cancelBtn.className = "btn danger sm";
       cancelBtn.textContent = "Cancel";
       cancelBtn.onclick = async () => { await api(`/jobs/${j.id}/cancel`, { method: "POST" }); refreshJobs(); };
       actions.appendChild(cancelBtn);
     } else {
       const delBtn = document.createElement("button");
-      delBtn.className = "secondary";
+      delBtn.className = "btn ghost sm";
       delBtn.textContent = "Remove";
       delBtn.onclick = async () => { await api(`/jobs/${j.id}`, { method: "DELETE" }); refreshJobs(); };
       actions.appendChild(delBtn);
     }
     tbody.appendChild(tr);
   }
-  refreshQueueSummary();
+  refreshQueueSummary(jobs);
   refreshComparable();
 }
 
@@ -985,7 +1218,7 @@ function showLog(jobId) {
   logEventSource.addEventListener("eof", () => { logEventSource.close(); });
 }
 
-// --- Init ---------------------------------------------------------------
+// --- Init --------------------------------------------------------------
 (async function init() {
   await loadHealth();
   schema = await api("/schema");
