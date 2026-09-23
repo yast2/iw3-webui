@@ -495,6 +495,14 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+// Previews and comparisons are called by their level ("Standard_…", "Fast vs
+// Standard (stacked)_…"), so on their own they do not say which film. Their
+// folder does: show "Previews/<film>/<file>" for those, the bare name otherwise.
+function shownOutput(path) {
+  const at = path.indexOf("/Previews/");
+  return at >= 0 ? path.slice(at + 1) : path.split("/").pop();
+}
+
 // tqdm hands us seconds; show them the way a person reads a wait.
 function fmtDuration(sec) {
   if (sec === null || sec === undefined) return "—";
@@ -1492,7 +1500,7 @@ async function refreshJobs() {
       <td data-label="Created">${esc(created)}</td>
       <td data-label="Mode">${esc(j.mode)}${j.parent_id ? '<span class="tag" title="queued by a comparison">for compare</span>' : ""}</td>
       <td data-label="Quality">${qualityCell(j)}</td>
-      <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? j.output_path.split("/").pop() : j.input_path)}</td>
+      <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? shownOutput(j.output_path) : j.input_path)}</td>
       <td data-label="Format">${esc(j.stereo_format)}</td>
       <td data-label="Status"><span class="status status-${j.status}" title="${esc(j.error || "")}"><span class="dot ${STATUS_DOT[j.status] || ""}"></span>${STATUS_WORD[j.status] || j.status}</span></td>
       <td data-label="Progress">${progressCell(j)}</td>

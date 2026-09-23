@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, "/opt/nunif")
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -123,6 +124,28 @@ LABEL_FONT_CANDIDATES = [
 # ---------------------------------------------------------------------------
 CHAIN_SCRIPT = Path(os.environ.get("IW3_CHAIN_SCRIPT", "/opt/iw3-chain/run_chain.sh"))
 CHAIN_WORK_ROOT = Path(os.environ.get("IW3_CHAIN_WORK", str(OUTPUT_ROOT / "_chain")))
+
+# ---------------------------------------------------------------------------
+# Where previews and comparisons end up
+#
+# One folder per source file under Previews/, named after the file, holding
+# every preview of it and every comparison built from them - so a comparison
+# always sits next to the two previews it was made from, and each file is
+# called what it is ("Standard_G2EMA_LRF.mp4", "Fast vs Standard (stacked)_
+# LRF.mp4"). They used to land in _previews/<job id>/ and _compare/<job id>/,
+# a folder per job, which nobody browsing the share could find their way in.
+#
+# Nothing appears there half-written: a job works in its scratch folder
+# (CHAIN_WORK_ROOT/<job id>, whether or not it runs the pipeline) and its file
+# is moved into place when it is finished. Scratch goes when a job is done or
+# canceled; a failed job's scratch is kept for SCRATCH_KEEP_FAILED_HOURS so
+# there is something to inspect, and then swept.
+# ---------------------------------------------------------------------------
+PREVIEWS_ROOT = Path(os.environ.get("IW3_PREVIEWS", str(OUTPUT_ROOT / "Previews")))
+SCRATCH_KEEP_FAILED_HOURS = float(os.environ.get("SCRATCH_KEEP_FAILED_HOURS", "48"))
+SCRATCH_SWEEP_EVERY_SEC = 3600
+# The per-job folders of earlier versions, emptied into Previews/ at start.
+OLD_PREVIEW_ROOTS = (OUTPUT_ROOT / "_previews", OUTPUT_ROOT / "_compare")
 
 # ---------------------------------------------------------------------------
 # Which device to convert on
@@ -1292,7 +1315,10 @@ def _job_frames(job_row, info):
 
 
 def _preview_dir(job_id) -> Path:
-    return OUTPUT_ROOT / "_previews" / job_id
+    """Where a preview is cut, converted and trimmed - inside the job's scratch,
+    so a failed or canceled one never leaves anything in view. The finished
+    file is moved to Previews/ (_place_file)."""
+    return _chain_work_dir(job_id) / "preview"
 
 
 def _preview_frames(info, fps=None):
@@ -1830,6 +1856,97 @@ def _deliver(path: Path):
     return path
 
 
+_UNSAFE_IN_NAMES = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_component(text, limit=120):
+    """A file or folder name that survives SMB and Windows: reserved characters
+    replaced, no trailing dot or space, not absurdly long."""
+    name = re.sub(r"\s+", " ", _UNSAFE_IN_NAMES.sub("_", text)).strip()
+    return name[:limit].rstrip(". ") or "unnamed"
+
+
+def _level_name(row):
+    """'Standard', 'Fast +flow' - a job's level as a person would say it."""
+    level = QUALITY_BY_ID.get(row["quality"], {})
+    name = level.get("label") or row["quality"] or "custom"
+    switches = (["+flow"] if row["opt_flow"] else []) + (["+4K"] if row["opt_upscale"] else [])
+    return name + (" " + " ".join(switches) if switches else "")
+
+
+def _preview_folder(input_path) -> Path:
+    """Previews/<source file name>: everything made to look at one file."""
+    return PREVIEWS_ROOT / _safe_component(Path(input_path).stem)
+
+
+def _file_tag(produced: Path):
+    """The recipe and stereo tag at the end of a produced file's name, e.g.
+    '_G2EMA_LRF' or '_LRF_Full_SBS_LRF'. Kept verbatim: players read the
+    side-by-side format from it, and the recipe code tells two versions of a
+    level apart."""
+    stem = produced.stem
+    _, sep, tail = stem.rpartition("_preview")
+    if sep:
+        return tail or "_LRF"
+    at = stem.find("_LRF")
+    return stem[at:] if at >= 0 else "_LRF"
+
+
+def _fmt_at(seconds):
+    s = int(round(seconds))
+    return f"{s // 60}m{s % 60:02d}s"
+
+
+def _free_name(folder: Path, base, tag, start_sec=None) -> Path:
+    """folder/<base><tag>.mp4, or - if that is taken - the same with the window
+    start in it, then with a counter. An existing file is never replaced: it
+    may be the very preview a comparison was built from."""
+    names = [base] + ([f"{base} from {_fmt_at(start_sec)}"] if start_sec is not None else [])
+    for name in names:
+        candidate = folder / f"{_safe_component(name)}{tag}.mp4"
+        if not candidate.exists():
+            return candidate
+    n = 2
+    while True:
+        candidate = folder / f"{_safe_component(names[-1])} ({n}){tag}.mp4"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def _preview_dest(row, produced: Path, start_sec=None) -> Path:
+    return _free_name(_preview_folder(row["input_path"]), _level_name(row),
+                      _file_tag(produced), start_sec)
+
+
+def _compare_dest(a, b, label_a, label_b, layout) -> Path:
+    """Next to preview A: '<A> vs <B> (stacked)_LRF.mp4'."""
+    name_a = re.sub(r"^[AB] - ", "", label_a or _level_name(a))
+    name_b = re.sub(r"^[AB] - ", "", label_b or _level_name(b))
+    base = f"{name_a} vs {name_b} ({'stacked' if layout == 'stacked' else 'A-B-A'})"
+    if a["input_path"] != b["input_path"]:
+        base += f" - B from {Path(b['input_path']).stem}"
+    return _free_name(_preview_folder(a["input_path"]), base, "_LRF")
+
+
+def _move_into_place(src: Path, dest: Path):
+    """Move a finished file to where it is browsed. A rename when both sit on
+    one filesystem - the normal case, scratch lives on the output share - and
+    otherwise a copy under a hidden name first, so the visible name only ever
+    appears complete."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(src, dest)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        tmp = dest.with_name(f".{dest.name}.partial")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+        src.unlink()
+    return _deliver(dest)
+
+
 def _label_font():
     for candidate in LABEL_FONT_CANDIDATES:
         if Path(candidate).is_file():
@@ -1954,7 +2071,8 @@ COMPARE_LAYOUTS = {
 
 
 def _compare_dir(job_id) -> Path:
-    return OUTPUT_ROOT / "_compare" / job_id
+    """Where a comparison is encoded; the finished file is moved to Previews/."""
+    return _chain_work_dir(job_id)
 
 
 async def _run_compare(job_id, row, logf):
@@ -2051,11 +2169,12 @@ async def _run_compare(job_id, row, logf):
         raise RuntimeError(f"comparison came out {produced.get('width')}x"
                             f"{produced.get('height')}, expected "
                             f"{out_size[0]}x{out_size[1]}")
-    _deliver(dest)
+    final = _move_into_place(dest, _compare_dest(a, b, label_a, label_b, layout))
+    await asyncio.to_thread(shutil.rmtree, out_dir, True)
     await _write_log(job_id, logf,
-                      f"[compare] wrote {dest} in {took:.0f}s\n")
+                      f"[compare] wrote {final} in {took:.0f}s\n")
     with _db() as conn:
-        conn.execute("UPDATE jobs SET output_path=? WHERE id=?", (str(dest), job_id))
+        conn.execute("UPDATE jobs SET output_path=? WHERE id=?", (str(final), job_id))
         conn.commit()
 
 
@@ -2333,7 +2452,7 @@ async def _run_job(job_id):
                     # Cancelled during the scan or the cut: nothing of it is
                     # worth keeping.
                     _cancel_requested.discard(job_id)
-                    shutil.rmtree(out_dir, ignore_errors=True)
+                    shutil.rmtree(_chain_work_dir(job_id), ignore_errors=True)
                     await _finish_canceled(job_id, logf)
                     return
                 # Report it as a finished-and-failed job rather than letting it
@@ -2356,8 +2475,8 @@ async def _run_job(job_id):
             # Cancelled in the gap between cutting the clip and starting the
             # conversion, when there was no process to signal.
             _cancel_requested.discard(job_id)
-            if row["mode"] == "preview":
-                shutil.rmtree(_preview_dir(job_id), ignore_errors=True)
+            if row["mode"] == "preview" or is_chain:
+                shutil.rmtree(_chain_work_dir(job_id), ignore_errors=True)
             await _finish_canceled(job_id, logf)
             return
         await _write_log(job_id, logf, f"$ {' '.join(argv)}\n")
@@ -2435,28 +2554,17 @@ async def _run_job(job_id):
     # anything else after a Cancel is a cancellation, not a failure.
     canceled = returncode != 0 and job_id in _cancel_requested
     _cancel_requested.discard(job_id)
+    work = _chain_work_dir(job_id)
     if canceled:
         # Unlike a failure, a cancellation has nothing to inspect: its scratch
         # (frames, depth maps - 11 GB after half an hour of a full film) goes.
         with open(log_path, "a") as logf:
-            if is_chain:
-                await _write_log(job_id, logf, f"[pipeline] canceled, removing scratch "
-                                               f"{_chain_work_dir(job_id)}\n")
-                await asyncio.to_thread(shutil.rmtree, _chain_work_dir(job_id), True)
-            if row["mode"] == "preview":
-                await asyncio.to_thread(shutil.rmtree, _preview_dir(job_id), True)
+            if is_chain or row["mode"] == "preview":
+                await _write_log(job_id, logf, f"[pipeline] canceled, removing scratch {work}\n")
+                await asyncio.to_thread(shutil.rmtree, work, True)
             await _finish_canceled(job_id, logf)
         return
     status = "done" if returncode == 0 else "failed"
-    if is_chain:
-        work = _chain_work_dir(job_id)
-        if status == "done":
-            # Tens of thousands of extracted frames and as many depth maps -
-            # keeping them would fill the output volume within a few jobs.
-            # Off the event loop: on the array this takes over half a minute.
-            await asyncio.to_thread(shutil.rmtree, work, True)
-        elif work.exists():
-            await _publish_log(job_id, f"[pipeline] scratch kept for inspection: {work}\n")
     output_path = None
     if status == "done" and row["mode"] == "preview" and preview_plan:
         # Everything produced so far still carries the lead and tail frames.
@@ -2486,24 +2594,37 @@ async def _run_job(job_id):
                                         preview_plan["visible"], preview_plan["fps"], logf)
                 produced[0].unlink(missing_ok=True)
                 tmp.replace(final)
-                output_path = _deliver(final)
+                produced = [final]
             except Exception as e:
                 status = "failed"
                 tmp.unlink(missing_ok=True)
                 await _publish_log(job_id, f"[preview] {e}\n")
-        else:
-            output_path = _deliver(produced[0])
-
-    if clip_path is not None:
         if status == "done":
-            # The clip is an intermediate, reproducible in seconds. Only the
-            # stereo output next to it is worth keeping.
+            # Into Previews/<source>/ under the level's name. The window start
+            # only goes into the name when the plain one is taken, i.e. when
+            # there is a second preview of this level to tell apart.
+            start_sec = (None if preview_plan["whole_source"]
+                         else preview_plan["start_frame"] / preview_plan["fps"])
             try:
-                clip_path.unlink()
-            except OSError:
-                pass
-        else:
-            await _publish_log(job_id, f"[preview] clip kept for inspection: {clip_path}\n")
+                output_path = _move_into_place(
+                    produced[0], _preview_dest(row, produced[0], start_sec))
+                await _publish_log(job_id, f"[preview] saved as {output_path}\n")
+            except OSError as e:
+                status = "failed"
+                await _publish_log(job_id, f"[preview] could not be moved into place: {e}\n")
+
+    if clip_path is not None and status != "done":
+        await _publish_log(job_id, f"[preview] clip kept for inspection: {clip_path}\n")
+    if status == "done":
+        if is_chain or row["mode"] == "preview":
+            # Tens of thousands of extracted frames and as many depth maps -
+            # keeping them would fill the output volume within a few jobs.
+            # Off the event loop: on the array this takes over half a minute.
+            # Only now, after the preview has been moved out of it.
+            await asyncio.to_thread(shutil.rmtree, work, True)
+    elif work.exists():
+        await _publish_log(job_id, f"[pipeline] scratch kept for inspection: {work} "
+                                   f"(removed after {SCRATCH_KEEP_FAILED_HOURS:g} h)\n")
     # The conversion's own exit code, and separately whatever happened after
     # it: a job whose conversion succeeded and whose trim failed is failed, and
     # saying "exit code 0" about it would be the wrong half of the story.
@@ -2602,6 +2723,117 @@ async def _compare_loop():
                 conn.commit()
 
 
+def _migrate_old_previews():
+    """Move previews and comparisons out of the per-job folders of earlier
+    versions (_previews/<id>/, _compare/<id>/) into Previews/<source>/, and
+    point their jobs at the new place. Runs at every start; once the old
+    folders are gone it has nothing to do."""
+    if not any(root.is_dir() for root in OLD_PREVIEW_ROOTS):
+        return
+    moved = 0
+    with _db() as conn:
+        previews = {r["id"]: r for r in conn.execute("SELECT * FROM jobs WHERE mode='preview'")}
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE status='done' AND mode IN ('preview','compare') "
+            "AND output_path IS NOT NULL ORDER BY mode='compare', finished_at").fetchall()
+        for r in rows:
+            src = Path(r["output_path"])
+            if src.parent.parent not in OLD_PREVIEW_ROOTS or not src.is_file():
+                continue
+            if r["mode"] == "preview":
+                dest = _preview_dest(r, src, r["preview_start_sec"])
+            else:
+                params = json.loads(r["params_json"])
+                a, b = previews.get(params.get("a")), previews.get(params.get("b"))
+                if a is None or b is None:
+                    print(f"[iw3-webui] migrate: comparison {r['id']} has lost a preview "
+                          f"row, left at {src}", flush=True)
+                    continue
+                dest = _compare_dest(a, b, params.get("label_a"), params.get("label_b"),
+                                     params.get("layout", "aba"))
+            try:
+                _move_into_place(src, dest)
+            except OSError as e:
+                print(f"[iw3-webui] migrate: could not move {src}: {e}", flush=True)
+                continue
+            conn.execute("UPDATE jobs SET output_path=? WHERE id=?", (str(dest), r["id"]))
+            conn.commit()
+            moved += 1
+            print(f"[iw3-webui] migrate: {src} -> {dest}", flush=True)
+    for root in OLD_PREVIEW_ROOTS:
+        if not root.is_dir():
+            continue
+        for d in root.iterdir():
+            try:
+                d.rmdir()          # only ever an emptied job folder
+            except OSError:
+                print(f"[iw3-webui] migrate: not empty, left in place: {d}", flush=True)
+        try:
+            root.rmdir()
+        except OSError:
+            pass
+    print(f"[iw3-webui] migrate: {moved} file(s) moved into {PREVIEWS_ROOT}", flush=True)
+
+
+def _age_hours(stamp, fallback_path):
+    """Hours since a job finished, or since its folder last changed."""
+    when = None
+    if stamp:
+        try:
+            when = datetime.fromisoformat(stamp)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            when = when.timestamp()
+        except ValueError:
+            when = None
+    if when is None:
+        try:
+            when = fallback_path.stat().st_mtime
+        except OSError:
+            return 0.0
+    return (time.time() - when) / 3600
+
+
+def _sweep_scratch():
+    """Remove scratch nobody will look at any more.
+
+    A job's scratch goes the moment it is done or canceled; this catches what
+    that misses. A failed job's scratch stays for SCRATCH_KEEP_FAILED_HOURS -
+    it is the only thing to look at when finding out why - and so does a
+    folder no job owns, in case it is someone's work by hand. Queued and
+    running jobs are never touched.
+    """
+    if not CHAIN_WORK_ROOT.is_dir():
+        return
+    with _db() as conn:
+        for d in sorted(CHAIN_WORK_ROOT.iterdir()):
+            if not d.is_dir() or d.name in _running_procs:
+                continue
+            r = conn.execute("SELECT status, finished_at FROM jobs WHERE id=?",
+                             (d.name,)).fetchone()
+            if r is not None and r["status"] in ("queued", "running"):
+                continue
+            if r is not None and r["status"] in ("done", "canceled"):
+                why = f"left over from a {r['status']} job"
+            else:
+                age = _age_hours(r["finished_at"] if r is not None else None, d)
+                if age < SCRATCH_KEEP_FAILED_HOURS:
+                    continue
+                why = (f"failed {age:.0f} h ago" if r is not None
+                       else f"belongs to no job, untouched for {age:.0f} h")
+            shutil.rmtree(d, ignore_errors=True)
+            print(f"[iw3-webui] scratch removed ({why}): {d}", flush=True)
+
+
+async def _sweep_loop():
+    while True:
+        try:
+            await asyncio.to_thread(_sweep_scratch)
+        except Exception as e:
+            print(f"[iw3-webui] scratch sweep: {e}", flush=True)
+        await asyncio.sleep(SCRATCH_SWEEP_EVERY_SEC)
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -2618,8 +2850,15 @@ async def _startup():
         print(f"[iw3-webui] WARNING: {DEVICE_WARNING}", flush=True)
     else:
         print(f"[iw3-webui] device: --gpu {IW3_GPU} (set explicitly via IW3_GPU)", flush=True)
+    # Before the workers start, so a comparison never looks for a preview
+    # that is halfway between two folders. Renames on one share: instant.
+    try:
+        _migrate_old_previews()
+    except Exception as e:
+        print(f"[iw3-webui] migrate: {e}", flush=True)
     asyncio.create_task(_worker_loop())
     asyncio.create_task(_compare_loop())
+    asyncio.create_task(_sweep_loop())
     # Built at start so the first search does not wait for it.
     _ensure_search_index()
 
@@ -3136,6 +3375,12 @@ def queue_eta():
     }
 
 
+def _folder_has_video(folder: Path, recursive: bool) -> bool:
+    """True at the first video found; only walks the whole tree when there is none."""
+    entries = folder.rglob("*") if recursive else folder.iterdir()
+    return any(p.suffix.lower() in SEARCH_VIDEO_EXT and p.is_file() for p in entries)
+
+
 @app.post("/api/jobs")
 def create_job(job: JobCreate):
     if job.mode not in ("convert", "preview"):
@@ -3166,10 +3411,20 @@ def create_job(job: JobCreate):
             # of them is a queue's job, not a script's.
             raise HTTPException(400, f"quality level '{job.quality}' converts one file "
                                      f"at a time; queue the files individually")
+        if target.is_dir():
+            # Without "recursive" a folder used to get through here, and the
+            # script - which wants a file - stopped at once with "Quelle nicht
+            # gefunden" (db15e1ab, 23.09.: an empty folder, picked via
+            # "Select this folder").
+            raise HTTPException(400, f"quality level '{job.quality}' converts one video "
+                                     f"file, not a folder; open the folder and pick the file")
     elif job.flow or job.upscale:
         raise HTTPException(400, "the flow and upscale options are stages of the "
                                  "multi-stage pipeline; they do nothing on a "
                                  "single-pass level")
+    if target.is_dir() and not _folder_has_video(target, job.recursive):
+        raise HTTPException(400, f"no video files in {job.input_path}"
+                                 + ("" if job.recursive else " (subfolders count only with 'recursive')"))
     if job.preview_start_sec is not None:
         if job.mode != "preview":
             raise HTTPException(400, "preview_start_sec only means anything for a preview")
@@ -3224,14 +3479,7 @@ def _insert_job(conn, mode, input_path, recursive, stereo_format, params, qualit
 
 def _compare_label(row, fallback):
     """What a preview is called on the bar burned into a comparison."""
-    level = QUALITY_BY_ID.get(row["quality"], {})
-    name = level.get("label") or row["quality"] or "custom"
-    switches = []
-    if row["opt_flow"]:
-        switches.append("+flow")
-    if row["opt_upscale"]:
-        switches.append("+4K")
-    return f"{fallback} - {name}{(' ' + ' '.join(switches)) if switches else ''}"
+    return f"{fallback} - {_level_name(row)}"
 
 
 @app.get("/api/comparable")
