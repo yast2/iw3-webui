@@ -130,10 +130,14 @@ CHAIN_WORK_ROOT = Path(os.environ.get("IW3_CHAIN_WORK", str(OUTPUT_ROOT / "_chai
 #
 # One folder per source file under Previews/, named after the file, holding
 # every preview of it and every comparison built from them - so a comparison
-# always sits next to the two previews it was made from, and each file is
-# called what it is ("Standard_G2EMA_LRF.mp4", "Fast vs Standard (stacked)_
-# LRF.mp4"). They used to land in _previews/<job id>/ and _compare/<job id>/,
-# a folder per job, which nobody browsing the share could find their way in.
+# always sits next to the two previews it was made from. Each file carries the
+# video's name as well as what it is ("<video> - Standard_G2EMA_LRF.mp4",
+# "<video> - Fast vs Standard (stacked)_LRF.mp4"): a player lists files, not
+# folders, and a library full of "Standard_G2EMA_LRF.mp4" says nothing. The
+# stereo tag stays at the very end, exactly as the conversion wrote it, because
+# that is where players look for the side-by-side format.
+# They used to land in _previews/<job id>/ and _compare/<job id>/, a folder
+# per job, which nobody browsing the share could find their way in.
 #
 # Nothing appears there half-written: a job works in its scratch folder
 # (CHAIN_WORK_ROOT/<job id>, whether or not it runs the pipeline) and its file
@@ -736,6 +740,20 @@ def _init_db():
         # It keeps its position, so it is picked up again first.
         conn.execute("UPDATE jobs SET status='queued', started_at=NULL "
                       "WHERE status='running'")
+        # The waiting line: videos parked for later. A table of its own, not a
+        # job status, so that nothing that reads the queue - the worker above
+        # all - can ever start one by accident. Older code ignores the table.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS waiting (
+                id TEXT PRIMARY KEY,
+                input_path TEXT NOT NULL UNIQUE,
+                title TEXT,
+                cove_video_id TEXT,
+                source TEXT,
+                added_at TEXT NOT NULL,
+                compare_id TEXT
+            )
+        """)
 
 
 _init_db()
@@ -1857,13 +1875,31 @@ def _deliver(path: Path):
 
 
 _UNSAFE_IN_NAMES = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# A name may be 255 *bytes* on the array's filesystems, and a film title in
+# Japanese spends three of them per character. The video's name is what gets
+# shortened when a file name would not fit; the level and the tag never are.
+NAME_MAX_BYTES = 250
+FOLDER_MAX_BYTES = 180
 
 
-def _safe_component(text, limit=120):
+def _cut_bytes(text, limit):
+    """`text` shortened to at most `limit` bytes of UTF-8, never mid-character."""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text
+    return raw[:limit].decode("utf-8", errors="ignore")
+
+
+def _safe_component(text, limit=FOLDER_MAX_BYTES):
     """A file or folder name that survives SMB and Windows: reserved characters
     replaced, no trailing dot or space, not absurdly long."""
     name = re.sub(r"\s+", " ", _UNSAFE_IN_NAMES.sub("_", text)).strip()
-    return name[:limit].rstrip(". ") or "unnamed"
+    return _cut_bytes(name, limit).rstrip(". ") or "unnamed"
+
+
+def _video_name(input_path):
+    """The source's file name without extension, as folders and files carry it."""
+    return _safe_component(Path(input_path).stem)
 
 
 def _level_name(row):
@@ -1876,7 +1912,7 @@ def _level_name(row):
 
 def _preview_folder(input_path) -> Path:
     """Previews/<source file name>: everything made to look at one file."""
-    return PREVIEWS_ROOT / _safe_component(Path(input_path).stem)
+    return PREVIEWS_ROOT / _video_name(input_path)
 
 
 def _file_tag(produced: Path):
@@ -1897,36 +1933,45 @@ def _fmt_at(seconds):
     return f"{s // 60}m{s % 60:02d}s"
 
 
-def _free_name(folder: Path, base, tag, start_sec=None) -> Path:
-    """folder/<base><tag>.mp4, or - if that is taken - the same with the window
-    start in it, then with a counter. An existing file is never replaced: it
-    may be the very preview a comparison was built from."""
-    names = [base] + ([f"{base} from {_fmt_at(start_sec)}"] if start_sec is not None else [])
+def _file_name(video, what, tag):
+    """'<video> - <what><tag>.mp4', the video's name shortened if it must be."""
+    what = _safe_component(what, NAME_MAX_BYTES)
+    tail = f" - {what}{tag}.mp4"
+    room = NAME_MAX_BYTES - len(tail.encode("utf-8"))
+    return _cut_bytes(video, max(room, 16)).rstrip(". ") + tail
+
+
+def _free_name(folder: Path, video, what, tag, start_sec=None) -> Path:
+    """folder/<video> - <what><tag>.mp4, or - if that is taken - the same with
+    the window start in it, then with a counter. An existing file is never
+    replaced: it may be the very preview a comparison was built from."""
+    names = [what] + ([f"{what} from {_fmt_at(start_sec)}"] if start_sec is not None else [])
     for name in names:
-        candidate = folder / f"{_safe_component(name)}{tag}.mp4"
+        candidate = folder / _file_name(video, name, tag)
         if not candidate.exists():
             return candidate
     n = 2
     while True:
-        candidate = folder / f"{_safe_component(names[-1])} ({n}){tag}.mp4"
+        candidate = folder / _file_name(video, f"{names[-1]} ({n})", tag)
         if not candidate.exists():
             return candidate
         n += 1
 
 
 def _preview_dest(row, produced: Path, start_sec=None) -> Path:
-    return _free_name(_preview_folder(row["input_path"]), _level_name(row),
-                      _file_tag(produced), start_sec)
+    return _free_name(_preview_folder(row["input_path"]), _video_name(row["input_path"]),
+                      _level_name(row), _file_tag(produced), start_sec)
 
 
 def _compare_dest(a, b, label_a, label_b, layout) -> Path:
-    """Next to preview A: '<A> vs <B> (stacked)_LRF.mp4'."""
+    """Next to preview A: '<video> - <A> vs <B> (stacked)_LRF.mp4'."""
     name_a = re.sub(r"^[AB] - ", "", label_a or _level_name(a))
     name_b = re.sub(r"^[AB] - ", "", label_b or _level_name(b))
-    base = f"{name_a} vs {name_b} ({'stacked' if layout == 'stacked' else 'A-B-A'})"
+    what = f"{name_a} vs {name_b} ({'stacked' if layout == 'stacked' else 'A-B-A'})"
     if a["input_path"] != b["input_path"]:
-        base += f" - B from {Path(b['input_path']).stem}"
-    return _free_name(_preview_folder(a["input_path"]), base, "_LRF")
+        what += f" - B from {_cut_bytes(_video_name(b['input_path']), 60).rstrip('. ')}"
+    return _free_name(_preview_folder(a["input_path"]), _video_name(a["input_path"]),
+                      what, "_LRF")
 
 
 def _move_into_place(src: Path, dest: Path):
@@ -2600,9 +2645,9 @@ async def _run_job(job_id):
                 tmp.unlink(missing_ok=True)
                 await _publish_log(job_id, f"[preview] {e}\n")
         if status == "done":
-            # Into Previews/<source>/ under the level's name. The window start
-            # only goes into the name when the plain one is taken, i.e. when
-            # there is a second preview of this level to tell apart.
+            # Into Previews/<source>/ as "<source> - <level><tag>". The window
+            # start only goes into the name when the plain one is taken, i.e.
+            # when there is a second preview of this level to tell apart.
             start_sec = (None if preview_plan["whole_source"]
                          else preview_plan["start_frame"] / preview_plan["fps"])
             try:
@@ -3220,10 +3265,20 @@ def _search_status():
 
 
 @app.get("/api/search")
-def search(q: str = "", limit: int = SEARCH_LIMIT):
-    """File and folder names under /input; every word has to occur in the name."""
+def search(q: str = "", limit: int = SEARCH_LIMIT, under: str = ""):
+    """File and folder names under /input; every word has to occur in the name.
+
+    `under` narrows it to one folder and everything below it - the folder the
+    picker has open. Empty means the whole share. The folder itself is not a
+    result, only what it holds."""
     _ensure_search_index()
     words = [w for w in q.lower().split() if w]
+    scope = ""
+    if under.strip("/"):
+        target = _safe_input_path(under)
+        if not target.is_dir():
+            raise HTTPException(400, f"not a folder: {under}")
+        scope = str(target.relative_to(INPUT_ROOT)) + "/"
     with _search_lock:
         entries = _search["entries"]
         partial = entries is None
@@ -3233,12 +3288,14 @@ def search(q: str = "", limit: int = SEARCH_LIMIT):
     results, total = [], 0
     if words:
         for low, name, rel, kind in entries:
+            if scope and not rel.startswith(scope):
+                continue
             if all(w in low for w in words):
                 total += 1
                 if len(results) < limit:
                     folder = rel[:-len(name)].rstrip("/")
                     results.append({"name": name, "path": rel, "folder": folder, "type": kind})
-    return {"query": q, "results": results, "total": total,
+    return {"query": q, "under": scope.rstrip("/"), "results": results, "total": total,
             "capped": total > len(results), "partial": partial,
             "index": _search_status()}
 
@@ -3249,19 +3306,27 @@ def search_refresh():
     return {"started": started, "index": _search_status()}
 
 
+# Finished, failed and canceled jobs shown under the queue. The rows stay in
+# the database - the estimates are calibrated from them and previews are
+# found through them - they only stop being listed.
+HISTORY_SHOWN = 10
+
+
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(history: int = HISTORY_SHOWN):
     # Two blocks, because they answer different questions and want opposite
     # orders: what is going to happen (queue order, all of it - truncating the
     # thing you are about to reorder would be its own bug), then what already
-    # happened (newest first, capped).
+    # happened (most recently finished first, the last HISTORY_SHOWN of it;
+    # ?history=N asks for more).
+    history = max(0, min(int(history), 1000))
     with _db() as conn:
         active = conn.execute(
             "SELECT * FROM jobs WHERE status IN ('running','queued') "
             "ORDER BY status <> 'running', position, created_at").fetchall()
         history = conn.execute(
             "SELECT * FROM jobs WHERE status NOT IN ('running','queued') "
-            "ORDER BY created_at DESC LIMIT 200").fetchall()
+            "ORDER BY COALESCE(finished_at, created_at) DESC LIMIT ?", (history,)).fetchall()
     rows = list(active) + list(history)
 
     jobs = []
@@ -3317,7 +3382,7 @@ def _describe_waiting_compare(job, by_id, finish_at):
         if p is not None and p["status"] == "done":
             done += 1
             continue
-        # A reused preview may have dropped out of the 200-row window; ask.
+        # A reused preview may long have dropped out of the history shown; ask.
         if p is None:
             with _db() as conn:
                 row = conn.execute("SELECT status FROM jobs WHERE id=?",
@@ -3383,6 +3448,17 @@ def _folder_has_video(folder: Path, recursive: bool) -> bool:
 
 @app.post("/api/jobs")
 def create_job(job: JobCreate):
+    params = _checked_job(job)
+    with _db() as conn:
+        job_id = _insert_job(conn, job.mode, job.input_path, job.recursive,
+                             job.stereo_format, params, job.quality, job.flow,
+                             job.upscale, job.preview_start_sec)
+        conn.commit()
+    return {"id": job_id}
+
+
+def _checked_job(job: JobCreate):
+    """Refuse what cannot run; return the parameters the job will carry."""
     if job.mode not in ("convert", "preview"):
         raise HTTPException(400, "mode must be convert or preview")
     if not job.input_path.strip():
@@ -3432,14 +3508,7 @@ def create_job(job: JobCreate):
             raise HTTPException(400, "preview_start_sec must not be negative")
     # A named level *is* its parameter set, stored so the row keeps saying what
     # ran even if the table above is later corrected.
-    params = dict(level["params"]) if level.get("params") else dict(job.params)
-
-    with _db() as conn:
-        job_id = _insert_job(conn, job.mode, job.input_path, job.recursive,
-                             job.stereo_format, params, job.quality, job.flow,
-                             job.upscale, job.preview_start_sec)
-        conn.commit()
-    return {"id": job_id}
+    return dict(level["params"]) if level.get("params") else dict(job.params)
 
 
 def _insert_job(conn, mode, input_path, recursive, stereo_format, params, quality,
@@ -3647,6 +3716,308 @@ def create_file_compare(body: CompareFileCreate):
             (job_id, body.input_path, body.stereo_format, json.dumps(params), _now()))
         conn.commit()
     return {"id": job_id, "label_a": params["label_a"], "label_b": params["label_b"]}
+
+
+# ---------------------------------------------------------------------------
+# The waiting line
+#
+# Videos parked for later: picked in Cove (or here) today, given a level and
+# queued another day - or compared Fast against Standard first, to decide the
+# level by looking. Parked videos never start by themselves; only "queue"
+# turns one into a job, at the level chosen for it. The levels and their
+# recipes are this app's alone: a client sends a file and, at most, a level
+# name, never parameters.
+#
+# Each row is priced like a queued job (same model, same function), so the
+# figure next to it is the figure the queue will show once it is queued.
+# Reading a file's length and size means opening it, which on the array can
+# mean waking a disk; that happens in a background thread, and a row whose
+# file has not been read yet says so instead of holding up the list.
+# ---------------------------------------------------------------------------
+WAITING_LEVELS = [lv["id"] for lv in QUALITY_LEVELS if lv.get("costs")]
+WAITING_TITLE_MAX = 300
+
+_probe_pending: list[Path] = []
+_probe_pending_lock = threading.Lock()
+_probe_thread: threading.Thread | None = None
+
+
+def _probe_cached(path: Path):
+    """(known, info) from the probe cache, without opening the file."""
+    try:
+        st = path.stat()
+    except OSError:
+        return True, None
+    key = (str(path), st.st_size, int(st.st_mtime))
+    if key in _probe_cache:
+        return True, _probe_cache[key]
+    return False, None
+
+
+def _probe_worker():
+    global _probe_thread
+    while True:
+        with _probe_pending_lock:
+            if not _probe_pending:
+                _probe_thread = None
+                return
+            path = _probe_pending.pop(0)
+        try:
+            _probe_video(path)
+        except Exception as e:  # a broken file must not stop the others
+            print(f"[iw3-webui] probe {path}: {e}", flush=True)
+
+
+def _warm_probes(paths):
+    """Read these files' length and size in the background."""
+    global _probe_thread
+    with _probe_pending_lock:
+        for p in paths:
+            if p not in _probe_pending:
+                _probe_pending.append(p)
+        if _probe_thread is None and _probe_pending:
+            _probe_thread = threading.Thread(target=_probe_worker, name="probe", daemon=True)
+            _probe_thread.start()
+
+
+def _waiting_estimates(input_path, info):
+    """Every level's price for this file, with and without the switches."""
+    out = {}
+    px = _px_of(info)
+    for lv_id in WAITING_LEVELS:
+        level = QUALITY_BY_ID[lv_id]
+        row = {"quality": lv_id, "mode": "convert",
+               "params_json": json.dumps(level.get("params") or {})}
+        frames = _job_frames(row, info)
+        combos = ([(False, False), (True, False), (False, True), (True, True)]
+                  if level["chain"] else [(False, False)])
+        out[lv_id] = {}
+        for flow, upscale in combos:
+            seconds, extrapolated = _level_seconds(lv_id, frames, px, flow=flow, upscale=upscale)
+            key = "+".join(k for k, on in (("flow", flow), ("upscale", upscale)) if on)
+            out[lv_id][key] = {"seconds": round(seconds) if seconds else None,
+                               "extrapolated": extrapolated}
+    return out
+
+
+class WaitingItem(BaseModel):
+    input_path: str          # relative to /input, as everywhere else
+    title: str | None = None
+    cove_video_id: str | int | None = None
+
+
+class WaitingAdd(BaseModel):
+    items: list[WaitingItem]
+    source: str | None = None   # who parked them: "cove", "ui", ...
+
+
+@app.post("/api/waiting")
+def add_waiting(body: WaitingAdd):
+    """Park one or many videos. Parking the same file twice keeps one row
+    (and fills in a title or Cove id it did not have yet)."""
+    if not body.items:
+        raise HTTPException(400, "nothing to add")
+    results, warm = [], []
+    with _db() as conn:
+        for item in body.items:
+            rel = item.input_path.strip().lstrip("/")
+            result = {"input_path": rel}
+            try:
+                path = _safe_input_path(rel)
+                if not rel:
+                    raise HTTPException(400, "empty path")
+                if not path.is_file():
+                    raise HTTPException(400, "no such file")
+                if path.suffix.lower() not in SEARCH_VIDEO_EXT:
+                    raise HTTPException(400, f"not a video file ({path.suffix or 'no extension'})")
+            except HTTPException as e:
+                results.append({**result, "status": "rejected", "error": e.detail})
+                continue
+            title = (item.title or "").strip()[:WAITING_TITLE_MAX] or None
+            cove_id = str(item.cove_video_id) if item.cove_video_id is not None else None
+            old = conn.execute("SELECT id FROM waiting WHERE input_path=?", (rel,)).fetchone()
+            if old is not None:
+                conn.execute("UPDATE waiting SET title=COALESCE(title, ?), "
+                             "cove_video_id=COALESCE(cove_video_id, ?) WHERE id=?",
+                             (title, cove_id, old["id"]))
+                results.append({**result, "id": old["id"], "status": "already waiting"})
+                continue
+            wid = str(uuid.uuid4())
+            conn.execute("INSERT INTO waiting (id, input_path, title, cove_video_id, source, "
+                         "added_at) VALUES (?, ?, ?, ?, ?, ?)",
+                         (wid, rel, title, cove_id, (body.source or "")[:40] or None, _now()))
+            results.append({**result, "id": wid, "status": "added"})
+            warm.append(path)
+        conn.commit()
+    _warm_probes(warm)
+    counts = {s: sum(1 for r in results if r["status"] == s)
+              for s in ("added", "already waiting", "rejected")}
+    return {"results": results, **{k.replace(" ", "_"): v for k, v in counts.items()}}
+
+
+@app.get("/api/waiting")
+def list_waiting():
+    """The parked videos, oldest first, each priced at every level."""
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM waiting ORDER BY added_at, rowid").fetchall()
+        active: dict[str, list] = {}
+        for r in conn.execute("SELECT id, mode, quality, status, input_path FROM jobs "
+                              "WHERE status IN ('queued','running') AND mode<>'compare'"):
+            active.setdefault(r["input_path"], []).append(
+                {"id": r["id"], "mode": r["mode"], "quality": r["quality"], "status": r["status"]})
+        compare_ids = [r["compare_id"] for r in rows if r["compare_id"]]
+        compares = {r["id"]: r for r in conn.execute(
+            f"SELECT id, status, error, output_path FROM jobs WHERE id IN "
+            f"({','.join('?' * len(compare_ids))})", compare_ids)} if compare_ids else {}
+    items, unread = [], []
+    for r in rows:
+        try:
+            path = _safe_input_path(r["input_path"])
+        except HTTPException:
+            path = None
+        exists = bool(path and path.is_file())
+        known, info = _probe_cached(path) if exists else (True, None)
+        if exists and not known:
+            unread.append(path)
+        usable = bool(info and info.get("duration_sec") and info.get("fps"))
+        cmp = compares.get(r["compare_id"]) if r["compare_id"] else None
+        items.append({
+            "id": r["id"],
+            "input_path": r["input_path"],
+            "name": Path(r["input_path"]).name,
+            "title": r["title"],
+            "cove_video_id": r["cove_video_id"],
+            "source": r["source"],
+            "added_at": r["added_at"],
+            "exists": exists,
+            "probed": known,
+            "duration_sec": round(info["duration_sec"], 2) if usable else None,
+            "fps": round(info["fps"], 3) if usable else None,
+            "width": info.get("width") if info else None,
+            "height": info.get("height") if info else None,
+            "estimates": _waiting_estimates(r["input_path"], info) if usable else None,
+            "in_queue": active.get(r["input_path"], []),
+            "compare": ({"id": cmp["id"], "status": cmp["status"], "error": cmp["error"],
+                         "file": Path(cmp["output_path"]).name if cmp["output_path"] else None}
+                        if cmp is not None else None),
+        })
+    _warm_probes(unread)
+    return {"items": items, "levels": WAITING_LEVELS, "default": DEFAULT_QUALITY}
+
+
+class WaitingQueueItem(BaseModel):
+    id: str
+    quality: str = DEFAULT_QUALITY
+    flow: bool = False
+    upscale: bool = False
+    stereo_format: str = "full_sbs"
+
+
+class WaitingQueue(BaseModel):
+    items: list[WaitingQueueItem]
+
+
+@app.post("/api/waiting/queue")
+def queue_waiting(body: WaitingQueue):
+    """Queue parked videos as full conversions, each at its own level; a
+    queued one leaves the waiting line."""
+    results = []
+    with _db() as conn:
+        for item in body.items:
+            row = conn.execute("SELECT * FROM waiting WHERE id=?", (item.id,)).fetchone()
+            if row is None:
+                results.append({"id": item.id, "status": "rejected", "error": "not in the waiting line"})
+                continue
+            if item.quality not in WAITING_LEVELS:
+                results.append({"id": item.id, "status": "rejected",
+                                "error": f"'{item.quality}' is not a level with a recipe; "
+                                         f"pick one of {', '.join(WAITING_LEVELS)}"})
+                continue
+            job = JobCreate(mode="convert", input_path=row["input_path"], quality=item.quality,
+                            flow=item.flow, upscale=item.upscale,
+                            stereo_format=item.stereo_format)
+            try:
+                params = _checked_job(job)
+            except HTTPException as e:
+                results.append({"id": item.id, "status": "rejected", "error": e.detail})
+                continue
+            job_id = _insert_job(conn, "convert", job.input_path, False, job.stereo_format,
+                                 params, job.quality, job.flow, job.upscale, None)
+            conn.execute("DELETE FROM waiting WHERE id=?", (item.id,))
+            conn.commit()
+            results.append({"id": item.id, "status": "queued", "job_id": job_id,
+                            "quality": item.quality})
+    return {"results": results,
+            "queued": sum(1 for r in results if r["status"] == "queued"),
+            "rejected": sum(1 for r in results if r["status"] == "rejected")}
+
+
+class WaitingCompare(BaseModel):
+    ids: list[str]
+    level_a: str = "fast"
+    level_b: str = "standard"
+    layout: str = "aba"
+    stereo_format: str = "full_sbs"
+
+
+@app.post("/api/waiting/compare")
+def compare_waiting(body: WaitingCompare):
+    """Fast against Standard (by default) for each parked video: both previews
+    on one window and the comparison, as the compare button does. The video
+    stays parked - the comparison is how its level gets decided."""
+    results = []
+    for wid in body.ids:
+        with _db() as conn:
+            row = conn.execute("SELECT * FROM waiting WHERE id=?", (wid,)).fetchone()
+            busy = None
+            if row is not None and row["compare_id"]:
+                busy = conn.execute("SELECT status FROM jobs WHERE id=? AND status IN "
+                                    "('queued','running')", (row["compare_id"],)).fetchone()
+        if row is None:
+            results.append({"id": wid, "status": "rejected", "error": "not in the waiting line"})
+            continue
+        if busy is not None:
+            results.append({"id": wid, "status": "already comparing", "compare_id": row["compare_id"]})
+            continue
+        try:
+            made = create_file_compare(CompareFileCreate(
+                input_path=row["input_path"], level_a=body.level_a, level_b=body.level_b,
+                layout=body.layout, stereo_format=body.stereo_format))
+        except HTTPException as e:
+            results.append({"id": wid, "status": "rejected", "error": e.detail})
+            continue
+        with _db() as conn:
+            conn.execute("UPDATE waiting SET compare_id=? WHERE id=?", (made["id"], wid))
+            conn.commit()
+        results.append({"id": wid, "status": "comparing", "compare_id": made["id"]})
+    return {"results": results,
+            "comparing": sum(1 for r in results if r["status"] == "comparing"),
+            "rejected": sum(1 for r in results if r["status"] == "rejected")}
+
+
+class WaitingRemove(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/waiting/remove")
+def remove_waiting(body: WaitingRemove):
+    """Take videos out of the waiting line. Nothing on disk is touched, and a
+    comparison already made for one stays where it is."""
+    with _db() as conn:
+        removed = 0
+        for wid in body.ids:
+            removed += conn.execute("DELETE FROM waiting WHERE id=?", (wid,)).rowcount
+        conn.commit()
+    return {"removed": removed}
+
+
+@app.delete("/api/waiting/{wid}")
+def remove_one_waiting(wid: str):
+    with _db() as conn:
+        if conn.execute("DELETE FROM waiting WHERE id=?", (wid,)).rowcount == 0:
+            raise HTTPException(404, "not in the waiting line")
+        conn.commit()
+    return {"removed": 1}
 
 
 class QueueOrder(BaseModel):

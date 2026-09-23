@@ -36,7 +36,16 @@ The extension needs the container. The container does not need the extension.
 - **ETAs for jobs that haven't started**, from throughput measured on *your*
   machine — see [Estimates](#estimates).
 - **Live log streaming** over SSE, throttled so a multi-hour job doesn't take
-  the browser tab down with it.
+  the browser tab down with it. The log opens under the job's own row.
+- **A short history** — every queued and running job, plus the ten most
+  recently finished. Older rows stay in the database (the estimates are
+  calibrated from them) and are simply not listed; `GET /api/jobs?history=N`
+  returns more.
+- **A waiting line** for videos you want to convert some other day — parked
+  from the page or over HTTP, never started by themselves. See
+  [Waiting line](#waiting-line).
+- **Search** over every file and folder name, limited to the folder that is
+  open in the picker (the whole share at the top).
 - **One-minute preview**, on a window chosen by rule — see [Preview](#preview).
 - **Two previews in one file**, interleaved per eye — see [Comparing two previews](#comparing-two-previews-in-one-file).
 - **Settings read from iw3 itself** — the form's fields, defaults and choices
@@ -106,7 +115,7 @@ curl -s localhost:8790/api/health
 |---|---|
 | `/config` | `NUNIF_HOME`: model checkpoints, the job database, per-job logs |
 | `/input` | Your source videos. Mount read-only; the container never writes here. |
-| `/output` | Converted files, `_previews/<job-id>/` for previews, `_compare/<job-id>/` for comparison files |
+| `/output` | Converted files; previews and comparisons in `Previews/<video>/`; work in progress in `_chain/<job-id>/` |
 
 ### Model checkpoints
 
@@ -204,7 +213,17 @@ arrives in an mkv or wmv. If the video codec itself cannot go into mp4
 deleted once the preview finishes, and kept if it fails, so you can look at
 what iw3 choked on.
 
-The finished preview is named `…_LRF.mp4` and lands in `/output/_previews/<job-id>/`.
+A preview is worked on in its scratch folder, `/output/_chain/<job-id>/`, and
+only the finished file is moved to where it is browsed:
+`/output/Previews/<video>/<video> - <Level><tag>.mp4`, for instance
+`Previews/Holiday/Holiday - Standard_G2EMA_LRF.mp4`. The tag at the end is the
+one the conversion wrote, untouched, because players read the side-by-side
+format from it. A second preview of the same level gets its window start into
+the name (`… - Standard from 5m30s_…`). Scratch goes when a job is done or
+canceled; a failed job's is kept for 48 hours (`SCRATCH_KEEP_FAILED_HOURS`) so
+there is something to look at, then swept. Previews made by earlier versions
+(`_previews/<job-id>/`, `_compare/<job-id>/`) are moved into `Previews/` on
+start.
 
 `PREVIEW_SECONDS`, `PREVIEW_LEAD_FRAMES` and `PREVIEW_TAIL_FRAMES` change the
 three numbers above.
@@ -245,7 +264,45 @@ because a comparison is two or three minutes of fixed-function video encoder —
 a different unit of the chip from the one a conversion occupies — and behind a
 four-hour job a tool for looking at two previews is worth nothing.
 
-The output is named `…_LRF.mp4` and lands in `/output/_compare/<job-id>/`.
+The output lands next to preview A, as
+`/output/Previews/<video>/<video> - Fast vs Standard (stacked)_LRF.mp4` (or
+`(A-B-A)`).
+
+## Waiting line
+
+Videos you have picked but do not want converted yet. A parked video never
+starts by itself: it is a row in a table of its own that nothing in the queue
+reads. Each row shows the video's length and size, a level (Standard unless
+changed, with the flow and 4K switches where the level takes them) and what
+that level costs for that file — priced by the same model the queue uses, so
+the figure is the one the queue will show. From there, for any selection:
+
+- **Queue** — one full conversion per video, each at its own level; queued
+  videos leave the waiting line.
+- **Compare Fast vs Standard** — both previews on one window and the
+  comparison of the two, as the compare button makes them; the video stays
+  parked until you have looked and chosen.
+- **Remove** — out of the waiting line; nothing on disk is touched.
+
+The levels and their recipes belong to this app. A client names a file and at
+most a level, never parameters:
+
+```sh
+# park one or many (title and an outside id are optional, shown in the list)
+curl -X POST localhost:8790/api/waiting -H 'Content-Type: application/json' \
+     -d '{"items":[{"input_path":"films/Holiday.mp4","title":"Holiday"}],"source":"cove"}'
+curl localhost:8790/api/waiting
+curl -X POST localhost:8790/api/waiting/queue -H 'Content-Type: application/json' \
+     -d '{"items":[{"id":"<id>","quality":"standard"}]}'
+curl -X POST localhost:8790/api/waiting/compare -H 'Content-Type: application/json' \
+     -d '{"ids":["<id>"],"layout":"stacked"}'
+curl -X POST localhost:8790/api/waiting/remove -H 'Content-Type: application/json' \
+     -d '{"ids":["<id>"]}'
+```
+
+Parking a file that is already parked keeps the one row. Every call answers per
+item (`added`, `already waiting`, `queued`, `comparing`, `rejected` with the
+reason), so one bad path does not sink a batch.
 
 ## Quality levels
 

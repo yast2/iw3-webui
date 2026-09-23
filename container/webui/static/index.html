@@ -285,9 +285,46 @@
     font-family:var(--mono);font-size:12.5px}
   #queueSummary{font-family:var(--mono);font-size:11px;color:var(--faint);text-transform:none;
     letter-spacing:0}
-  #log{background:var(--inset);border:1px solid var(--line);border-radius:8px;
-    padding:12px;height:320px;overflow:auto;margin-top:14px;
-    font-family:var(--mono);font-size:12px;white-space:pre-wrap;display:none;color:var(--muted)}
+  /* A job's log opens under its own row, one at a time, and follows the job
+     live; the button that opened it closes it again. */
+  tr.log-open td{background:#181818}
+  tr.logrow td{padding:0 10px 14px;border-bottom:1px solid #1f1f1f}
+  tbody tr.logrow:hover td{background:transparent}
+  .joblog-head{display:flex;align-items:center;gap:10px;margin:2px 0 6px;font-family:var(--mono);
+    font-size:10.5px;letter-spacing:1px;text-transform:uppercase;color:var(--faint)}
+  .joblog-head .live{color:var(--accent)}
+  .joblog{margin:0;background:var(--inset);border:1px solid var(--line);
+    border-left:3px solid var(--accent);border-radius:8px;padding:10px 12px;
+    max-height:320px;overflow:auto;font-family:var(--mono);font-size:12px;
+    white-space:pre-wrap;word-break:break-word;color:var(--muted)}
+  .btn.sm.on{border-color:var(--accent);color:var(--accent)}
+  .histnote{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:10px}
+
+  /* ---- waiting line ---- */
+  .wtable td{vertical-align:middle}
+  .wtable td.chk,.wtable th.chk{width:1%}
+  .wtable input[type=checkbox]{accent-color:var(--accent);margin:0;cursor:pointer}
+  .wtable td.vid{max-width:360px}
+  .wtable .wv{min-width:0;flex:1}
+  .wtable .wt{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .wtable .wf{font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .wtable td.num{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+  .wtable select{width:auto;padding:5px 8px;font-size:12px}
+  .wlevel{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .chip{display:inline-flex;align-items:center;font-family:var(--mono);font-size:10.5px;
+    padding:2px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);
+    cursor:pointer;user-select:none;white-space:nowrap}
+  .chip input{display:none}
+  .chip.on{color:#000;background:var(--accent);border-color:var(--accent)}
+  .chip.off{opacity:.3;cursor:not-allowed}
+  .badges{display:flex;gap:5px;flex-wrap:wrap;margin-top:3px}
+  .badge{font-family:var(--mono);font-size:10.5px;padding:1px 7px;border-radius:999px;
+    border:1px solid var(--line);color:var(--faint);white-space:nowrap}
+  .badge.hot{color:var(--accent);border-color:rgba(255,153,0,.4)}
+  .badge.bad{color:var(--bad);border-color:rgba(224,87,78,.4)}
+  .wbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px}
+  .wbar .count{font-family:var(--mono);font-size:12px;color:var(--muted);margin-right:auto}
 
   /* ---- phone ---- */
   /* The table becomes one card per job. No JS involved, so the queue logic
@@ -309,6 +346,11 @@
     td:empty{display:none}
     td.path{max-width:none;white-space:normal;word-break:break-all}
     .job-actions{flex-wrap:wrap;white-space:normal}
+    /* the log belongs to the card above it, not a card of its own */
+    tr.logrow{border:0;background:none;padding:0;margin-top:-8px}
+    tr.logrow td{display:block;padding:0 0 12px}
+    tr.logrow td::before{display:none}
+    .wtable td.vid{max-width:none}
     .phead .hint{display:none}   /* dragging is a mouse gesture; the buttons stay */
   }
 </style>
@@ -348,7 +390,7 @@
         <span class="hint">under /input</span></div>
       <div class="pbody">
         <div class="searchbar">
-          <input type="text" id="search" placeholder="search every file and folder name under /input — all words must match" autocomplete="off" spellcheck="false">
+          <input type="text" id="search" placeholder="search every file and folder name under /input — all words must match" autocomplete="off" spellcheck="false" title="Searches the folder that is open below and everything under it; at the top, the whole share">
           <button class="btn ghost sm" id="searchClear" hidden>clear</button>
         </div>
         <div class="crumbs" id="crumbs"></div>
@@ -390,6 +432,7 @@
         <div class="actions">
           <button class="btn" id="btnConvert">Convert the whole file</button>
           <button class="btn ghost" id="btnPreview">Preview one minute</button>
+          <button class="btn ghost" id="btnPark" title="Put the selected file in the waiting line below; it does not start until you queue it">Park it for later</button>
         </div>
         <div class="grid2">
           <div class="field">
@@ -460,6 +503,30 @@
       </div>
     </section>
 
+    <!-- WAITING LINE -->
+    <section class="panel" id="pWait">
+      <div class="phead"><span class="idx">··</span><h2>Waiting line</h2>
+        <span id="waitSummary" class="tag"></span>
+        <span class="hint">parked · nothing here starts by itself</span></div>
+      <div class="pbody">
+        <div class="table-wrap">
+          <table class="wtable">
+            <thead><tr><th class="chk"><input type="checkbox" id="waitAll" title="Select all"></th><th>Video</th><th>Length</th><th>Resolution</th><th>Level</th><th>Estimate</th></tr></thead>
+            <tbody id="waitRows"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="wbar">
+          <span class="count" id="waitCount">nothing selected</span>
+          <button class="btn sm" id="waitQueue" disabled>Queue</button>
+          <button class="btn ghost sm" id="waitCompare" disabled>Compare Fast vs Standard</button>
+          <button class="btn danger sm" id="waitRemove" disabled>Remove</button>
+        </div>
+        <div class="note">Each video is queued as a full conversion at the level picked in its row.
+          <strong>Compare</strong> queues a Fast and a Standard preview of the same minute and puts them
+          side by side (arrangement as in the compare panel); the video stays parked until you queue it.</div>
+      </div>
+    </section>
+
     <!-- STEP 4 -->
     <section class="panel" id="p4">
       <div class="phead"><span class="idx">04</span><h2>Job queue</h2>
@@ -472,7 +539,7 @@
             <tbody id="jobRows"></tbody>
           </table>
         </div>
-        <div id="log"></div>
+        <div class="histnote" id="histNote"></div>
       </div>
     </section>
   </main>
@@ -493,14 +560,6 @@ async function api(path, opts) {
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
-// Previews and comparisons are called by their level ("Standard_…", "Fast vs
-// Standard (stacked)_…"), so on their own they do not say which film. Their
-// folder does: show "Previews/<film>/<file>" for those, the bare name otherwise.
-function shownOutput(path) {
-  const at = path.indexOf("/Previews/");
-  return at >= 0 ? path.slice(at + 1) : path.split("/").pop();
 }
 
 // tqdm hands us seconds; show them the way a person reads a wait.
@@ -559,6 +618,7 @@ async function loadBrowser(path) {
   catch (e) { el.innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; return; }
   currentBrowsePath = data.path;
   renderCrumbs(data.path);
+  showSearchScope();
   el.innerHTML = "";
   if (data.path) {
     const pick = document.createElement("div");
@@ -628,9 +688,17 @@ function selectEntry(entry) {
 // (built in the background; a walk of the share takes minutes). A result is
 // picked exactly like a row in the browser: a file is selected, a folder is
 // opened. Clearing the box goes back to browsing where you were.
+// The search covers the folder that is open and everything below it - at the
+// top, the whole share - and the box says which, before anything is typed.
 let searchTimer = null;
 let searchSeq = 0;
 const searchEl = document.getElementById("search");
+
+function showSearchScope() {
+  searchEl.placeholder = currentBrowsePath
+    ? `search in /input/${currentBrowsePath} and its subfolders — all words must match`
+    : "search every file and folder name under /input — all words must match";
+}
 searchEl.addEventListener("input", () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(runSearch, 250);
@@ -655,7 +723,7 @@ async function runSearch() {
   const seq = ++searchSeq;
   document.getElementById("searchClear").hidden = false;
   let data;
-  try { data = await api("/search?q=" + encodeURIComponent(q)); }
+  try { data = await api("/search?" + new URLSearchParams({ q, under: currentBrowsePath })); }
   catch (e) {
     document.getElementById("browser").innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
     return;
@@ -681,7 +749,8 @@ function indexLine(ix) {
 function renderSearch(data) {
   document.getElementById("crumbs").innerHTML =
     `<span style="color:var(--text)">search</span><span class="sep">/</span>`
-    + `<span>${esc(data.query)}</span>`;
+    + `<span>${esc(data.query)}</span>`
+    + `<span class="sep">&nbsp;in&nbsp;</span><span>/input${data.under ? "/" + esc(data.under) : ""}</span>`;
   const el = document.getElementById("browser");
   el.innerHTML = "";
   for (const r of data.results) {
@@ -707,19 +776,26 @@ function renderSearch(data) {
     el.appendChild(row);
   }
   if (!data.results.length) {
-    el.innerHTML = `<div class="empty">${data.partial ? "Nothing yet &ndash; the index is still being built." : "No file or folder name contains all of those words."}</div>`;
+    el.innerHTML = `<div class="empty">${data.partial ? "Nothing yet &ndash; the index is still being built."
+      : data.under ? "No file or folder name in this folder contains all of those words."
+      : "No file or folder name contains all of those words."}</div>`;
   }
   const meta = document.getElementById("searchMeta");
   meta.hidden = false;
   const count = data.capped
     ? `<strong>${data.results.length} of ${data.total.toLocaleString()} matches shown</strong> &ndash; add a word to narrow it down`
     : `${data.total.toLocaleString()} match${data.total === 1 ? "" : "es"}`;
-  meta.innerHTML = `${count} &middot; ${indexLine(data.index)} `
+  const scope = data.under
+    ? ` in /input/${esc(data.under)} &middot; <button id="searchWide" title="Search the whole share instead">search all of /input</button>`
+    : "";
+  meta.innerHTML = `${count}${scope} &middot; ${indexLine(data.index)} `
     + `&middot; <button id="searchRefresh" title="Read /input again">refresh index</button>`;
   document.getElementById("searchRefresh").onclick = async () => {
     try { await api("/search/refresh", { method: "POST" }); } catch (e) {}
     runSearch();
   };
+  const wide = document.getElementById("searchWide");
+  if (wide) wide.onclick = () => { currentBrowsePath = ""; showSearchScope(); runSearch(); };
   markSelected();
 }
 
@@ -1020,6 +1096,21 @@ async function submitJob(mode) {
 }
 document.getElementById("btnConvert").onclick = () => submitJob("convert");
 document.getElementById("btnPreview").onclick = () => submitJob("preview");
+document.getElementById("btnPark").onclick = async () => {
+  if (!selected || selected.type !== "file") {
+    alert("Only a single video can be parked. Open the folder and pick the file.");
+    return;
+  }
+  let r;
+  try {
+    r = await api("/waiting", { method: "POST", headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ items: [{ input_path: selected.path }], source: "ui" }) });
+  } catch (e) { alert("Could not park it:\n\n" + e.message); return; }
+  const res = r.results[0];
+  if (res.status === "rejected") { alert("Could not park it: " + res.error); return; }
+  await refreshWaiting(true);
+  document.getElementById("pWait").scrollIntoView({ behavior: "smooth", block: "start" });
+};
 
 // --- Comparing two levels of the selected file ------------------------
 // One button: the server works out the preview window once, queues preview A
@@ -1482,6 +1573,9 @@ async function refreshJobs() {
   if (drag.id) return;
   const jobs = await api("/jobs");
   const tbody = document.getElementById("jobRows");
+  // The open log is one element kept across rebuilds - its text and where it
+  // was scrolled to survive the poll; only its place in the table is redone.
+  const logScroll = logBox.scrollTop, logAtEnd = logFollowing();
   tbody.innerHTML = "";
   for (const j of jobs) {
     const tr = document.createElement("tr");
@@ -1500,7 +1594,7 @@ async function refreshJobs() {
       <td data-label="Created">${esc(created)}</td>
       <td data-label="Mode">${esc(j.mode)}${j.parent_id ? '<span class="tag" title="queued by a comparison">for compare</span>' : ""}</td>
       <td data-label="Quality">${qualityCell(j)}</td>
-      <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? shownOutput(j.output_path) : j.input_path)}</td>
+      <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? j.output_path.split("/").pop() : j.input_path)}</td>
       <td data-label="Format">${esc(j.stereo_format)}</td>
       <td data-label="Status"><span class="status status-${j.status}" title="${esc(j.error || "")}"><span class="dot ${STATUS_DOT[j.status] || ""}"></span>${STATUS_WORD[j.status] || j.status}</span></td>
       <td data-label="Progress">${progressCell(j)}</td>
@@ -1545,9 +1639,11 @@ async function refreshJobs() {
       }
     }
     const logBtn = document.createElement("button");
-    logBtn.className = "btn ghost sm";
-    logBtn.textContent = "Log";
-    logBtn.onclick = () => showLog(j.id);
+    logBtn.className = "btn ghost sm logbtn";
+    logBtn.textContent = "Log ▾";
+    logBtn.title = "Show this job's log under its row";
+    logBtn.setAttribute("aria-expanded", "false");
+    logBtn.onclick = () => toggleLog(j.id);
     actions.appendChild(logBtn);
     if (j.status === "queued" || j.status === "running") {
       const cancelBtn = document.createElement("button");
@@ -1564,6 +1660,20 @@ async function refreshJobs() {
     }
     tbody.appendChild(tr);
   }
+  if (openLogJobId) {
+    const host = tbody.querySelector(`tr[data-id="${openLogJobId}"]`);
+    if (host) {
+      placeLog(host);
+      logBox.scrollTop = logAtEnd ? logBox.scrollHeight : logScroll;
+    } else {
+      closeLog();   // the job dropped out of the list
+    }
+  }
+  const finished = jobs.filter(j => j.status !== "queued" && j.status !== "running").length;
+  document.getElementById("histNote").textContent = finished
+    ? `Every waiting and running job, and the ${finished} most recently finished. `
+      + "Older jobs are kept for the estimates but no longer listed."
+    : "";
   refreshQueueSummary(jobs);
   refreshComparable();
 }
@@ -1590,28 +1700,268 @@ function scheduleLogFlush() {
     if (logBuffer.length > LOG_MAX_CHARS) {
       logBuffer = "[... earlier output truncated ...]\n" + logBuffer.slice(-LOG_MAX_CHARS);
     }
-    const logEl = document.getElementById("log");
-    logEl.textContent = logBuffer;
-    logEl.scrollTop = logEl.scrollHeight;
+    // Follow the end only if that is where the reader is; someone scrolled
+    // up to read an earlier line keeps their place.
+    const follow = logFollowing();
+    logBox.textContent = logBuffer;
+    if (follow) logBox.scrollTop = logBox.scrollHeight;
   }, LOG_FLUSH_MS);
 }
 
-function showLog(jobId) {
+// The row that holds the log, built once. Only one log is open at a time:
+// each open log is a live connection to the server, and a browser allows only
+// a handful per host before the page's own polling starts to queue behind them.
+const logRow = document.createElement("tr");
+logRow.className = "logrow";
+logRow.innerHTML = `<td colspan="10"><div class="joblog-head"><span id="logTitle"></span>`
+  + `<span class="live" id="logState"></span></div><pre class="joblog"></pre></td>`;
+const logBox = logRow.querySelector("pre");
+
+function logFollowing() {
+  return logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 24;
+}
+
+function placeLog(host) {
+  host.after(logRow);
+  host.classList.add("log-open");
+  const btn = host.querySelector(".logbtn");
+  if (btn) { btn.textContent = "Log ▴"; btn.classList.add("on"); btn.setAttribute("aria-expanded", "true"); }
+}
+
+function closeLog() {
+  if (logEventSource) { logEventSource.close(); logEventSource = null; }
+  if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
+  openLogJobId = null;
+  logRow.remove();
+  document.querySelectorAll("#jobRows tr.log-open").forEach(tr => {
+    tr.classList.remove("log-open");
+    const btn = tr.querySelector(".logbtn");
+    if (btn) { btn.textContent = "Log ▾"; btn.classList.remove("on"); btn.setAttribute("aria-expanded", "false"); }
+  });
+}
+
+function toggleLog(jobId) {
+  const again = openLogJobId === jobId;
+  closeLog();
+  if (again) return;
+  const host = document.querySelector(`#jobRows tr[data-id="${jobId}"]`);
+  if (!host) return;
   openLogJobId = jobId;
-  const logEl = document.getElementById("log");
-  logEl.style.display = "block";
-  logEl.textContent = "";
+  logBox.textContent = "";
   logBuffer = "";
   logPending = "";
-  if (logFlushTimer) { clearTimeout(logFlushTimer); logFlushTimer = null; }
-  if (logEventSource) logEventSource.close();
+  logRow.querySelector("#logTitle").textContent = "log · " + jobId.slice(0, 8);
+  const state = logRow.querySelector("#logState");
+  state.textContent = "loading…";
+  state.style.color = "";
+  placeLog(host);
   logEventSource = new EventSource(`${API}/jobs/${jobId}/log`);
+  logEventSource.onopen = () => { state.textContent = "live"; };
   logEventSource.onmessage = (e) => {
     logPending += JSON.parse(e.data);
     scheduleLogFlush();
   };
-  logEventSource.addEventListener("eof", () => { logEventSource.close(); });
+  logEventSource.addEventListener("eof", () => {
+    logEventSource.close();
+    state.textContent = "complete";
+    state.style.color = "var(--faint)";
+  });
 }
+
+// --- Waiting line ------------------------------------------------------
+// Parked videos, each with its own level (Standard unless changed) and that
+// level's price for that file. The server sends every level's price, with and
+// without the switches, so changing a row's level never waits on a request.
+// The table is only rebuilt when the list itself changes: rebuilding it under
+// an open dropdown would snap the dropdown shut.
+let waiting = [];
+let waitLevels = [];
+let waitDefault = "standard";
+let waitSig = "";
+const waitChoice = {};            // id -> {quality, flow, upscale}
+const waitChecked = new Set();
+
+function waitSpec(it) {
+  if (!waitChoice[it.id]) waitChoice[it.id] = { quality: waitDefault, flow: false, upscale: false };
+  return waitChoice[it.id];
+}
+
+function waitPrice(it) {
+  if (!it.estimates) return null;
+  const sp = waitSpec(it);
+  const lv = it.estimates[sp.quality];
+  if (!lv) return null;
+  const key = ["flow", "upscale"].filter(k => sp[k]).join("+");
+  return lv[key] || lv[""] || null;
+}
+
+function priceText(p) {
+  if (!p || p.seconds === null) return "—";
+  return (p.extrapolated ? "≈ " : "~ ") + fmtDuration(p.seconds);
+}
+
+function levelChain(id) {
+  return !!(quality?.levels.find(l => l.id === id) || {}).chain;
+}
+
+function waitBadges(it) {
+  const b = [];
+  if (!it.exists) b.push(`<span class="badge bad">file is gone</span>`);
+  for (const q of it.in_queue) {
+    const lv = quality?.levels.find(l => l.id === q.quality);
+    const words = [q.status === "running" ? "running" : "queued", q.mode === "preview" ? "preview" : "",
+                   lv ? lv.label : q.quality].filter(Boolean).join(" ");
+    b.push(`<span class="badge hot" title="There is already a job for this file">${esc(words)}</span>`);
+  }
+  if (it.compare) {
+    const c = it.compare;
+    const word = { queued: "comparing…", running: "comparing…", done: "comparison ready",
+                   failed: "comparison failed", canceled: "comparison canceled" }[c.status] || c.status;
+    b.push(`<span class="badge ${c.status === "done" ? "hot" : c.status === "failed" ? "bad" : ""}"`
+      + ` title="${esc(c.file ? "Previews/…/" + c.file : c.error || "")}">${esc(word)}</span>`);
+  }
+  if (it.source === "cove") b.push(`<span class="badge" title="Parked from Cove${it.cove_video_id ? ", video " + esc(it.cove_video_id) : ""}">from Cove</span>`);
+  return b.length ? `<div class="badges">${b.join("")}</div>` : "";
+}
+
+function renderWaiting() {
+  const tbody = document.getElementById("waitRows");
+  tbody.innerHTML = "";
+  if (!waiting.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="empty">Nothing parked. Pick a file above and use `
+      + `“Park it for later”, or send videos from Cove (iw3: Later, or Send to iw3 on a selection).</td></tr>`;
+  }
+  const levels = (quality?.levels || []).filter(l => waitLevels.includes(l.id));
+  for (const it of waiting) {
+    const sp = waitSpec(it);
+    const tr = document.createElement("tr");
+    tr.dataset.id = it.id;
+    const len = it.duration_sec !== null ? fmtDuration(it.duration_sec) : (it.probed ? "—" : "reading…");
+    const res = it.width ? `${it.width}×${it.height}` : (it.probed ? "—" : "");
+    const options = levels.map(l =>
+      `<option value="${l.id}" ${l.id === sp.quality ? "selected" : ""} ${l.available ? "" : "disabled"}>${esc(l.label)}</option>`).join("");
+    const chain = levelChain(sp.quality);
+    const chip = (k, label) =>
+      `<label class="chip ${sp[k] ? "on" : ""} ${chain ? "" : "off"}" title="${chain ? "" : "only with Economical or Standard"}">`
+      + `<input type="checkbox" data-k="${k}" ${sp[k] ? "checked" : ""} ${chain ? "" : "disabled"}>+${label}</label>`;
+    tr.innerHTML = `
+      <td class="chk" data-label="select"><input type="checkbox" class="wsel" ${waitChecked.has(it.id) ? "checked" : ""}></td>
+      <td class="vid" data-label="Video" title="/input/${esc(it.input_path)}"><div class="wv">
+        <div class="wt">${esc(it.title || it.name)}</div>
+        ${it.title ? `<div class="wf">${esc(it.name)}</div>` : ""}
+        ${waitBadges(it)}</div></td>
+      <td class="num" data-label="Length">${len}</td>
+      <td class="num" data-label="Resolution">${res}</td>
+      <td data-label="Level"><div class="wlevel"><select>${options}</select>${chip("flow", "flow")}${chip("upscale", "4K")}</div></td>
+      <td class="num eta" data-label="Estimate" title="${esc(waitPrice(it)?.extrapolated ? EXTRAPOLATED_TIP : "Priced like a queued job: this file's frames and pixel count at this level")}">${
+        it.exists ? (it.estimates ? priceText(waitPrice(it)) : (it.probed ? "—" : "reading…")) : "—"}</td>`;
+    tr.querySelector(".wsel").onchange = (e) => {
+      if (e.target.checked) waitChecked.add(it.id); else waitChecked.delete(it.id);
+      updateWaitBar();
+    };
+    tr.querySelector("select").onchange = (e) => {
+      sp.quality = e.target.value;
+      if (!levelChain(sp.quality)) { sp.flow = false; sp.upscale = false; }
+      renderWaiting();
+    };
+    for (const box of tr.querySelectorAll(".chip input")) {
+      box.onchange = () => { sp[box.dataset.k] = box.checked; renderWaiting(); };
+    }
+    tbody.appendChild(tr);
+  }
+  updateWaitBar();
+}
+
+function updateWaitBar() {
+  for (const id of [...waitChecked]) if (!waiting.some(it => it.id === id)) waitChecked.delete(id);
+  const picked = waiting.filter(it => waitChecked.has(it.id));
+  const all = document.getElementById("waitAll");
+  all.checked = waiting.length > 0 && picked.length === waiting.length;
+  all.indeterminate = picked.length > 0 && picked.length < waiting.length;
+  let total = 0, known = 0, approx = false;
+  for (const it of picked) {
+    const p = waitPrice(it);
+    if (p && p.seconds !== null) { total += p.seconds; known++; approx = approx || p.extrapolated; }
+  }
+  document.getElementById("waitCount").textContent = picked.length
+    ? `${picked.length} selected` + (known ? ` · ${approx ? "≈" : "~"}${fmtDuration(total)} at the chosen levels` : "")
+      + (known < picked.length ? ` (${picked.length - known} not priced yet)` : "")
+    : "nothing selected";
+  for (const id of ["waitQueue", "waitCompare", "waitRemove"]) {
+    document.getElementById(id).disabled = !picked.length;
+  }
+  document.getElementById("waitSummary").textContent =
+    waiting.length ? `${waiting.length} parked` : "";
+}
+
+async function refreshWaiting(force) {
+  let data;
+  try { data = await api("/waiting"); } catch (e) { return; }
+  waitLevels = data.levels;
+  waitDefault = data.default;
+  const sig = JSON.stringify(data.items.map(it => [it.id, it.probed, it.exists, it.title,
+    it.compare && it.compare.status, it.in_queue.map(q => q.id + q.status)]));
+  waiting = data.items;
+  if (force || sig !== waitSig) { waitSig = sig; renderWaiting(); }
+  // Files still being read: ask again soon rather than at the next 10 s tick.
+  if (!waitSoon && waiting.some(it => it.exists && !it.probed)) {
+    waitSoon = setTimeout(() => { waitSoon = null; refreshWaiting(); }, 2000);
+  }
+}
+let waitSoon = null;
+
+document.getElementById("waitAll").onchange = (e) => {
+  for (const it of waiting) { if (e.target.checked) waitChecked.add(it.id); else waitChecked.delete(it.id); }
+  renderWaiting();
+};
+
+function reportRejected(results, verb) {
+  const bad = results.filter(r => r.status === "rejected");
+  if (!bad.length) return;
+  const name = id => { const it = waiting.find(w => w.id === id); return it ? (it.title || it.name) : id; };
+  alert(`${bad.length} could not be ${verb}:\n\n` + bad.map(r => `• ${name(r.id)}: ${r.error}`).join("\n"));
+}
+
+document.getElementById("waitQueue").onclick = async () => {
+  const items = waiting.filter(it => waitChecked.has(it.id)).map(it => ({ id: it.id, ...waitSpec(it) }));
+  let r;
+  try {
+    r = await api("/waiting/queue", { method: "POST", headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ items }) });
+  } catch (e) { alert("Could not queue:\n\n" + e.message); return; }
+  reportRejected(r.results, "queued");
+  for (const x of r.results) if (x.status === "queued") { waitChecked.delete(x.id); delete waitChoice[x.id]; }
+  await refreshWaiting(true);
+  if (r.queued) { setStep(4, [1, 2, 3]); refreshJobs(); }
+};
+
+document.getElementById("waitCompare").onclick = async () => {
+  const ids = waiting.filter(it => waitChecked.has(it.id)).map(it => it.id);
+  const layout = document.getElementById("cmpLayout").value || "aba";
+  if (!confirm(`Queue a Fast and a Standard preview of the same minute for ${ids.length} `
+               + `video${ids.length === 1 ? "" : "s"}, and a comparison of each `
+               + `(${layout === "stacked" ? "A above B" : "A / B / A"})?`)) return;
+  let r;
+  try {
+    r = await api("/waiting/compare", { method: "POST", headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ ids, layout }) });
+  } catch (e) { alert("Could not queue the comparisons:\n\n" + e.message); return; }
+  reportRejected(r.results, "compared");
+  await refreshWaiting(true);
+  refreshJobs();
+};
+
+document.getElementById("waitRemove").onclick = async () => {
+  const ids = waiting.filter(it => waitChecked.has(it.id)).map(it => it.id);
+  if (ids.length > 1 && !confirm(`Take ${ids.length} videos out of the waiting line? `
+                                 + "The files themselves are not touched.")) return;
+  try {
+    await api("/waiting/remove", { method: "POST", headers: { "Content-Type": "application/json" },
+                                   body: JSON.stringify({ ids }) });
+  } catch (e) { alert("Could not remove:\n\n" + e.message); return; }
+  ids.forEach(id => { waitChecked.delete(id); delete waitChoice[id]; });
+  await refreshWaiting(true);
+};
 
 // --- Init --------------------------------------------------------------
 (async function init() {
@@ -1624,7 +1974,11 @@ function showLog(jobId) {
   await loadBrowser("");
   initQueueDnd();
   await refreshJobs();
+  await refreshWaiting(true);
   setInterval(refreshJobs, 3000);
+  // Parked videos change when someone parks one (here or from Cove) or a
+  // file's length has been read; neither needs a 3 s poll.
+  setInterval(refreshWaiting, 10000);
 })();
 </script>
 </body>
