@@ -695,7 +695,10 @@ def _init_db():
                            # "the window starts at second zero" are different
                            # statements and the second one is legal.
                            ("preview_start_sec", "REAL"),
-                           ("output_path", "TEXT")):
+                           ("output_path", "TEXT"),
+                           # The comparison a preview was queued for, if any.
+                           # Older code ignores the column.
+                           ("parent_id", "TEXT")):
             if name not in columns:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {decl}")
         if "position" not in columns:
@@ -1569,10 +1572,11 @@ async def _preview_plan(job_id, src: Path, job_row, logf):
         # Clamped rather than refused: the lead has to fit in front and the
         # tail behind, and a request a second outside that is a rounding
         # difference, not a different intention.
-        low = plan["lead"]
-        high = total_frames - plan["visible"] - plan["tail"]
-        start = max(low, min(wanted, high))
-        reason = f"chosen by hand, from {start / fps:.1f}s"
+        start = _clamp_start(info, plan, manual)
+        if job_row["parent_id"]:
+            reason = f"the window its comparison chose, from {start / fps:.1f}s"
+        else:
+            reason = f"chosen by hand, from {start / fps:.1f}s"
         if start != wanted:
             reason += (f" (asked for {wanted / fps:.1f}s, moved so the "
                         f"{plan['lead']}-frame lead fits)")
@@ -1930,12 +1934,15 @@ async def _trim_preview(job_id, src: Path, dest: Path, head, visible, fps, logf)
 #          decided - the second A is what makes a small difference visible,
 #          because you see the change twice and in both directions.
 #
-#   stacked  A above B within each eye: 1920x2160 per eye, 3840x2160 in all.
+#   stacked  A above B within each eye: twice the eye's height - 1920x2160
+#          per eye (3840x2160 in all) from a 1080p source, 2560x2880 per eye
+#          (5120x2880) from a 1440p one. The page states the size from the
+#          actual previews rather than from this example.
 #          Vertical rather than horizontal on purpose. Side by side within an
-#          eye would give each recipe 960x1080 - half a picture, in a 32:9
-#          strip, compared out of the corner of the eye. Stacked, both keep
-#          the full 1920x1080 and both sit centred.
-#          ⚠️ Each eye is then 1920x2160, an aspect ratio of 16:18. Players
+#          eye would give each recipe half a picture, in a 32:9 strip,
+#          compared out of the corner of the eye. Stacked, both keep the full
+#          picture and both sit centred.
+#          ⚠️ Each eye is then twice as tall as usual (16:18). Players
 #          that split a full-SBS frame and letterbox each half handle that;
 #          players that assume 16:9 per eye will stretch it. A/B/A is the
 #          arrangement with nothing to assume, which is why it is the default.
@@ -2054,6 +2061,213 @@ async def _run_compare(job_id, row, logf):
 
 def _slug(text):
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-")[:40] or "x"
+
+
+# ---------------------------------------------------------------------------
+# A comparison made from one file
+#
+# The first compare feature took two previews that already existed. Asked for
+# with a file selected, it compared whatever two previews there were - of a
+# different film - because it never looked at the selection. What was wanted
+# is the other way round: pick a file, pick two levels, get the comparison.
+#
+# So one request queues three things: preview A, preview B and a comparison
+# that waits for both. The window is worked out ONCE, by the comparison, and
+# handed to both previews as an explicit start: two independent scans of the
+# same file would almost certainly agree, but "almost certainly" is exactly
+# what a comparison of two recipes cannot rest on. A finished preview of the
+# same file, level, switches, format and window is reused instead of rerun.
+#
+# The comparison stays queued while it waits (it is not on any GPU), shows
+# what it is waiting for, and is canceled - with the reason - the moment one
+# of its previews fails or is canceled.
+# ---------------------------------------------------------------------------
+# The comparison cuts each frame into a left and a right half, so it only
+# makes sense for formats that are side by side.
+COMPARE_STEREO_FORMATS = ("full_sbs", "half_sbs", "cross_eyed")
+COMPARE_BUILD_SEC = 90.0   # measured: 76 s for a stacked 1440p pair
+
+
+def _spec_label(spec, side):
+    level = QUALITY_BY_ID.get(spec["quality"], {})
+    switches = (["+flow"] if spec.get("flow") else []) + (["+4K"] if spec.get("upscale") else [])
+    return f"{side} - {level.get('label') or spec['quality']}" + \
+        (" " + " ".join(switches) if switches else "")
+
+
+def _clamp_start(info, plan, seconds):
+    """First visible frame for a start time, moved so lead and tail fit."""
+    fps = info["fps"]
+    total_frames = int(round(info["duration_sec"] * fps))
+    wanted = int(round(float(seconds) * fps))
+    return max(plan["lead"], min(wanted, total_frames - plan["visible"] - plan["tail"]))
+
+
+_VISIBLE_FROM_LOG = re.compile(r"^\[preview\] visible frames (\d+)-", re.M)
+
+
+def _preview_start_from_log(job_id):
+    """The first visible frame a finished auto-window preview actually used."""
+    try:
+        text = (LOG_DIR / f"{job_id}.log").read_text(errors="replace")
+    except OSError:
+        return None
+    m = _VISIBLE_FROM_LOG.search(text)
+    return int(m.group(1)) if m else None
+
+
+def _find_reusable_preview(conn, input_path, stereo_format, spec, window, info, plan):
+    """A preview that already is (or is about to be) the one this side needs."""
+    level = QUALITY_BY_ID[spec["quality"]]
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE mode='preview' AND input_path=? AND quality=? "
+        "AND opt_flow=? AND opt_upscale=? AND stereo_format=? "
+        "AND status IN ('done','queued','running') "
+        "ORDER BY status='done' DESC, created_at DESC",
+        (input_path, spec["quality"], int(spec["flow"]), int(spec["upscale"]),
+         stereo_format)).fetchall()
+    for r in rows:
+        # A level's parameters are stored with the job; a job from before a
+        # correction to the level is a different recipe under the same name.
+        if level.get("params") and json.loads(r["params_json"]) != level["params"]:
+            continue
+        if r["status"] == "done" and not (r["output_path"] and Path(r["output_path"]).is_file()):
+            continue
+        if window["whole"]:
+            return r
+        if r["preview_start_sec"] is not None:
+            if _clamp_start(info, plan, r["preview_start_sec"]) == window["start_frame"]:
+                return r
+        elif r["status"] == "done" and _preview_start_from_log(r["id"]) == window["start_frame"]:
+            return r
+    return None
+
+
+async def _plan_file_compare(job_id, row, params, logf):
+    """Choose the window once, then find or queue both previews."""
+    src = _safe_input_path(row["input_path"])
+    info = _probe_video(src)
+    if not info or not info.get("duration_sec") or not info.get("fps"):
+        raise RuntimeError("could not probe the source for duration and frame rate")
+    fps = info["fps"]
+    plan = _preview_frames(info)
+    request = params.get("window_request")
+    if plan["whole_source"]:
+        window = {"whole": True, "start_frame": 0, "start_sec": None,
+                  "reason": "source too short for a window, both previews take it whole"}
+    elif request is not None:
+        start = _clamp_start(info, plan, request)
+        reason = f"chosen by hand, from {start / fps:.1f}s"
+        if start != int(round(float(request) * fps)):
+            reason += " (moved so the lead and tail fit)"
+        window = {"whole": False, "start_frame": start, "start_sec": start / fps,
+                  "reason": reason}
+    else:
+        _job_progress[job_id] = {"phase": "scan", "percent": None, "frames": None,
+                                 "total_frames": None, "elapsed_sec": None,
+                                 "eta_sec": None, "rate_fps": None}
+        await _write_log(job_id, logf, "[compare] choosing one window for both previews\n")
+        started = time.monotonic()
+        try:
+            diffs = await _scan_motion(job_id, src, logf)
+        finally:
+            _job_progress.pop(job_id, None)
+        if job_id in _cancel_requested:
+            raise RuntimeError("canceled during the window scan")
+        await _write_log(job_id, logf, f"[compare] scan took {time.monotonic() - started:.0f}s "
+                                       f"over {len(diffs) + 1} frames\n")
+        chosen = _choose_window(diffs, plan["visible"], plan["lead"])
+        if chosen is None:
+            total_frames = int(round(info["duration_sec"] * fps))
+            chosen = (max(plan["lead"], (total_frames - plan["visible"]) // 2),
+                      "the motion scan came up short, so the middle of the file was taken")
+        window = {"whole": False, "start_frame": chosen[0], "start_sec": chosen[0] / fps,
+                  "reason": chosen[1]}
+
+    ids, reused = {}, {}
+    with _db() as conn:
+        current = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if current is None or current["status"] != "queued":
+            return False     # canceled or removed while the scan ran
+        for side in ("a", "b"):
+            spec = params["spec_" + side]
+            hit = (_find_reusable_preview(conn, row["input_path"], row["stereo_format"],
+                                          spec, window, info, plan)
+                   if params.get("reuse", True) else None)
+            if hit is not None:
+                ids[side], reused[side] = hit["id"], hit["status"]
+                continue
+            level = QUALITY_BY_ID[spec["quality"]]
+            ids[side] = _insert_job(
+                conn, "preview", row["input_path"], False, row["stereo_format"],
+                dict(level["params"]) if level.get("params") else {},
+                spec["quality"], spec["flow"], spec["upscale"],
+                None if window["whole"] else window["start_sec"], parent_id=job_id)
+            reused[side] = None
+        params.update(a=ids["a"], b=ids["b"], window=window, reused=reused)
+        conn.execute("UPDATE jobs SET params_json=? WHERE id=?", (json.dumps(params), job_id))
+        conn.commit()
+
+    visible = plan["visible"]
+    where = ("the whole source" if window["whole"] else
+             f"frames {window['start_frame']}-{window['start_frame'] + visible - 1} "
+             f"({window['start_frame'] / fps:.1f}s-{(window['start_frame'] + visible) / fps:.1f}s)")
+    lines = [f"[compare] window: {window['reason']}", f"[compare] both previews cover {where}"]
+    for side in ("a", "b"):
+        how = (f"reusing {reused[side]} preview {ids[side]}" if reused[side]
+               else f"queued preview {ids[side]}")
+        lines.append(f"[compare] {params['label_' + side]}: {how}")
+    await _write_log(job_id, logf, "\n".join(lines) + "\n")
+    return True
+
+
+def _cancel_compare(job_id, reason):
+    with _db() as conn:
+        conn.execute("UPDATE jobs SET status='canceled', finished_at=?, error=? "
+                      "WHERE id=? AND status='queued'", (_now(), reason, job_id))
+        conn.commit()
+    with open(LOG_DIR / f"{job_id}.log", "a") as logf:
+        logf.write(f"[compare] canceled: {reason}\n")
+
+
+async def _advance_file_compare(row):
+    """'build' once both previews are done, else 'wait' (or 'gone')."""
+    job_id = row["id"]
+    params = json.loads(row["params_json"])
+    if not params.get("a"):
+        with open(LOG_DIR / f"{job_id}.log", "a") as logf:
+            try:
+                planned = await _plan_file_compare(job_id, row, params, logf)
+            except Exception as e:
+                if job_id in _cancel_requested:
+                    _cancel_requested.discard(job_id)
+                    return "gone"   # the cancel endpoint already filed it
+                await _write_log(job_id, logf, f"\n[job failed, {e}]\n")
+                with _db() as conn:
+                    conn.execute("UPDATE jobs SET status='failed', finished_at=?, error=? "
+                                  "WHERE id=? AND status='queued'", (_now(), str(e), job_id))
+                    conn.commit()
+                await _publish_log(job_id, "__EOF__")
+                return "gone"
+        return "wait" if planned else "gone"
+    with _db() as conn:
+        sides = {s: conn.execute("SELECT id, status, error FROM jobs WHERE id=?",
+                                 (params[s],)).fetchone() for s in ("a", "b")}
+    for s, r in sides.items():
+        label = params["label_" + s].split(" - ", 1)[-1]
+        name = f"preview {s.upper()} ({label})"
+        if r is None:
+            _cancel_compare(job_id, f"{name} was removed")
+            await _publish_log(job_id, "__EOF__")
+            return "gone"
+        if r["status"] in ("failed", "canceled"):
+            why = f"{name} {r['status']}" + (f": {r['error']}" if r["error"] else "")
+            _cancel_compare(job_id, why)
+            await _publish_log(job_id, "__EOF__")
+            return "gone"
+    if all(r["status"] == "done" for r in sides.values()):
+        return "build"
+    return "wait"
 
 
 async def _run_job(job_id):
@@ -2353,21 +2567,38 @@ async def _compare_loop():
     the conversion queue it would instead wait out four hours, and a tool for
     looking at two previews is worth nothing the day after you wanted to look.
     Still one at a time, so two comparisons cannot collide.
+
+    A comparison made from a file sits in the same list while it waits for its
+    previews; it is passed over until both are done, so a waiting comparison
+    never holds up one that is ready.
     """
     while True:
         with _db() as conn:
-            row = conn.execute(
-                "SELECT id FROM jobs WHERE status='queued' AND mode='compare' "
-                "ORDER BY created_at LIMIT 1").fetchone()
-        if row is None:
-            await asyncio.sleep(1.0)
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE status='queued' AND mode='compare' "
+                "ORDER BY created_at").fetchall()
+        ready = None
+        for row in rows:
+            if json.loads(row["params_json"]).get("source") != "file":
+                ready = row
+                break
+            try:
+                state = await _advance_file_compare(row)
+            except Exception as e:
+                print(f"[iw3-webui] compare {row['id']}: {e}", flush=True)
+                continue
+            if state == "build":
+                ready = row
+                break
+        if ready is None:
+            await asyncio.sleep(2.0)
             continue
         try:
-            await _run_job(row["id"])
+            await _run_job(ready["id"])
         except Exception as e:
             with _db() as conn:
                 conn.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE id=?",
-                              (_now(), str(e), row["id"]))
+                              (_now(), str(e), ready["id"]))
                 conn.commit()
 
 
@@ -2796,6 +3027,9 @@ def list_jobs():
 
     jobs = []
     queue_index = 0
+    # When each active conversion should be finished, counted down the queue
+    # in the order it runs - what a waiting comparison needs to know.
+    finish_at, clock, clock_ok = {}, 0.0, True
     for r in rows:
         job = dict(r)
         job["progress"] = None
@@ -2816,9 +3050,48 @@ def list_jobs():
             job["queue_index"] = queue_index
             job["eta_sec"] = _estimate_seconds(r)
             job["eta_estimated"] = job["eta_sec"] is not None
+        if job["status"] in ("running", "queued") and job["mode"] != "compare":
+            if job["eta_sec"] is None:
+                clock_ok = False
+            else:
+                clock += job["eta_sec"]
+            finish_at[job["id"]] = clock if clock_ok else None
         jobs.append(job)
 
+    for job in jobs:
+        if job["mode"] == "compare" and job["status"] == "queued":
+            _describe_waiting_compare(job, {j["id"]: j for j in jobs}, finish_at)
     return jobs
+
+
+def _describe_waiting_compare(job, by_id, finish_at):
+    """What a queued comparison is waiting for, and roughly until when."""
+    params = json.loads(job["params_json"])
+    if params.get("source") != "file":
+        return
+    if not params.get("a"):
+        job["progress"] = _job_progress.get(job["id"]) or {"phase": "plan"}
+        return
+    waiting, done, ends = [], 0, []
+    for side in ("a", "b"):
+        p = by_id.get(params[side])
+        if p is not None and p["status"] == "done":
+            done += 1
+            continue
+        # A reused preview may have dropped out of the 200-row window; ask.
+        if p is None:
+            with _db() as conn:
+                row = conn.execute("SELECT status FROM jobs WHERE id=?",
+                                   (params[side],)).fetchone()
+            if row is not None and row["status"] == "done":
+                done += 1
+                continue
+        waiting.append(params["label_" + side])
+        ends.append(finish_at.get(params[side]))
+    job["progress"] = {"phase": "wait", "done": done, "of": 2, "waiting_for": waiting}
+    if ends and all(e is not None for e in ends):
+        job["eta_sec"] = max(ends) + COMPARE_BUILD_SEC
+        job["eta_estimated"] = True
 
 
 @app.get("/api/queue-eta")
@@ -2906,38 +3179,47 @@ def create_job(job: JobCreate):
     # ran even if the table above is later corrected.
     params = dict(level["params"]) if level.get("params") else dict(job.params)
 
-    job_id = str(uuid.uuid4())
     with _db() as conn:
-        conn.execute(
-            "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, params_json, "
-            "status, created_at, position, quality, opt_flow, opt_upscale, "
-            "preview_start_sec) "
-            "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
-            (job_id, job.mode, job.input_path, int(job.recursive), job.stereo_format,
-             json.dumps(params), _now(), _next_position(conn),
-             job.quality, int(job.flow), int(job.upscale),
-             job.preview_start_sec if job.mode == "preview" else None),
-        )
-        # Previews jump the queue. The whole point of a preview is to see the
-        # settings before committing the hours a full conversion costs - behind
-        # a queue that is days deep it would answer the question long after the
-        # question stopped mattering.
-        #
-        # This is now an insertion rule rather than a sort rule, and that is the
-        # point: the queue has exactly one order, the one on screen. A preview
-        # lands in front, and from then on it can be dragged like any other row
-        # instead of being pinned there by a sort key nobody can see.
-        if job.mode == "preview":
-            modes = {r["id"]: r["mode"] for r in
-                      conn.execute("SELECT id, mode FROM jobs WHERE status='queued'")}
-            ids = [i for i in _queued_ids(conn) if i != job_id]
-            at = 0
-            while at < len(ids) and modes.get(ids[at]) == "preview":
-                at += 1
-            ids.insert(at, job_id)
-            _apply_queue_order(conn, ids)
+        job_id = _insert_job(conn, job.mode, job.input_path, job.recursive,
+                             job.stereo_format, params, job.quality, job.flow,
+                             job.upscale, job.preview_start_sec)
         conn.commit()
     return {"id": job_id}
+
+
+def _insert_job(conn, mode, input_path, recursive, stereo_format, params, quality,
+                flow, upscale, preview_start_sec, parent_id=None):
+    """Queue one conversion or preview; previews go in front. Caller commits."""
+    job_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, params_json, "
+        "status, created_at, position, quality, opt_flow, opt_upscale, "
+        "preview_start_sec, parent_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+        (job_id, mode, input_path, int(recursive), stereo_format,
+         json.dumps(params), _now(), _next_position(conn),
+         quality, int(flow), int(upscale),
+         preview_start_sec if mode == "preview" else None, parent_id),
+    )
+    # Previews jump the queue. The whole point of a preview is to see the
+    # settings before committing the hours a full conversion costs - behind
+    # a queue that is days deep it would answer the question long after the
+    # question stopped mattering.
+    #
+    # This is now an insertion rule rather than a sort rule, and that is the
+    # point: the queue has exactly one order, the one on screen. A preview
+    # lands in front, and from then on it can be dragged like any other row
+    # instead of being pinned there by a sort key nobody can see.
+    if mode == "preview":
+        modes = {r["id"]: r["mode"] for r in
+                  conn.execute("SELECT id, mode FROM jobs WHERE status='queued'")}
+        ids = [i for i in _queued_ids(conn) if i != job_id]
+        at = 0
+        while at < len(ids) and modes.get(ids[at]) == "preview":
+            at += 1
+        ids.insert(at, job_id)
+        _apply_queue_order(conn, ids)
+    return job_id
 
 
 def _compare_label(row, fallback):
@@ -2969,7 +3251,12 @@ def comparable():
         if not Path(r["output_path"]).is_file():
             continue
         level = QUALITY_BY_ID.get(r["quality"], {})
+        size = _file_size_cached(Path(r["output_path"]))
         out.append({
+            # The frame size the comparison will actually be built from, so the
+            # page can say what "A above B" comes out as.
+            "width": size[0] if size else None,
+            "height": size[1] if size else None,
             "id": r["id"],
             "input_path": r["input_path"],
             "quality": r["quality"],
@@ -2981,6 +3268,21 @@ def comparable():
             "file": Path(r["output_path"]).name,
         })
     return out
+
+
+_size_cache: dict[tuple, tuple] = {}
+
+
+def _file_size_cached(path: Path):
+    """(width, height) of a produced file, probed once per (path, mtime)."""
+    try:
+        key = (str(path), path.stat().st_mtime)
+    except OSError:
+        return None
+    if key not in _size_cache:
+        info = _stream_info(path)
+        _size_cache[key] = (info["width"], info["height"]) if info else None
+    return _size_cache[key]
 
 
 class CompareCreate(BaseModel):
@@ -3026,6 +3328,77 @@ def create_compare(body: CompareCreate):
              json.dumps(params), _now()))
         conn.commit()
     return {"id": job_id, "same_source": params["same_source"]}
+
+
+class CompareFileCreate(BaseModel):
+    input_path: str
+    level_a: str = "fast"
+    level_b: str = "standard"
+    flow_a: bool = False
+    upscale_a: bool = False
+    flow_b: bool = False
+    upscale_b: bool = False
+    layout: str = "aba"
+    stereo_format: str = "full_sbs"
+    # Null = the rule picks the window (once, for both). A number is the first
+    # visible second, as for a single preview.
+    preview_start_sec: float | None = None
+    reuse: bool = True
+
+
+@app.post("/api/compare/file")
+def create_file_compare(body: CompareFileCreate):
+    """Preview A, preview B and their comparison, from one selected file."""
+    if not body.input_path.strip():
+        raise HTTPException(400, "select a file to compare")
+    target = _safe_input_path(body.input_path)
+    if not target.is_file():
+        raise HTTPException(400, f"not a file: {body.input_path}")
+    if body.layout not in COMPARE_LAYOUTS:
+        raise HTTPException(400, f"layout must be one of: {', '.join(COMPARE_LAYOUTS)}")
+    if body.stereo_format not in COMPARE_STEREO_FORMATS:
+        raise HTTPException(400, "a comparison splits every frame into its left and right "
+                                 "eye, so it needs a side-by-side format ("
+                                 + ", ".join(COMPARE_STEREO_FORMATS) + ")")
+    if body.preview_start_sec is not None and body.preview_start_sec < 0:
+        raise HTTPException(400, "preview_start_sec must not be negative")
+    specs = {}
+    for side, lv_id, flow, up in (("a", body.level_a, body.flow_a, body.upscale_a),
+                                  ("b", body.level_b, body.flow_b, body.upscale_b)):
+        level = QUALITY_BY_ID.get(lv_id)
+        if level is None:
+            raise HTTPException(400, f"side {side.upper()}: unknown quality level {lv_id}")
+        if not level.get("costs"):
+            raise HTTPException(400, f"side {side.upper()}: {level['label']} has no fixed "
+                                     f"recipe to compare; pick one of the measured levels")
+        if level["chain"] and not _chain_available():
+            raise HTTPException(400, f"side {side.upper()}: {level['label']} needs the "
+                                     f"multi-stage pipeline, which is not installed")
+        if (flow or up) and not level["chain"]:
+            raise HTTPException(400, f"side {side.upper()}: the flow and 4K switches are "
+                                     f"pipeline stages; {level['label']} is a single pass")
+        specs[side] = {"quality": lv_id, "flow": bool(flow), "upscale": bool(up)}
+    if specs["a"] == specs["b"]:
+        raise HTTPException(400, "A and B are the same recipe - there would be nothing to see")
+    if not _probe_video(target):
+        raise HTTPException(400, "could not read that file as a video")
+
+    params = {
+        "source": "file", "layout": body.layout, "a": None, "b": None,
+        "spec_a": specs["a"], "spec_b": specs["b"],
+        "label_a": _spec_label(specs["a"], "A"), "label_b": _spec_label(specs["b"], "B"),
+        "window_request": body.preview_start_sec, "reuse": body.reuse,
+        "same_source": True,
+    }
+    job_id = str(uuid.uuid4())
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO jobs (id, mode, input_path, recursive, stereo_format, "
+            "params_json, status, created_at, position, quality) "
+            "VALUES (?, 'compare', ?, 0, ?, ?, 'queued', ?, 0, 'compare')",
+            (job_id, body.input_path, body.stereo_format, json.dumps(params), _now()))
+        conn.commit()
+    return {"id": job_id, "label_a": params["label_a"], "label_b": params["label_b"]}
 
 
 class QueueOrder(BaseModel):
@@ -3095,11 +3468,23 @@ def move_job(job_id: str, body: JobMove):
 @app.post("/api/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
     with _db() as conn:
-        row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        row = conn.execute("SELECT status, mode FROM jobs WHERE id=?", (job_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "not found")
         if row["status"] == "queued":
-            conn.execute("UPDATE jobs SET status='canceled', finished_at=? WHERE id=?", (_now(), job_id))
+            conn.execute("UPDATE jobs SET status='canceled', finished_at=?, error=NULL "
+                          "WHERE id=?", (_now(), job_id))
+            dropped = []
+            if row["mode"] == "compare":
+                # A comparison that is still waiting takes the previews it
+                # queued itself along with it - but only those still waiting.
+                # One already on the GPU, and any finished one it was going to
+                # reuse, stay: they are previews in their own right.
+                dropped = [r["id"] for r in conn.execute(
+                    "SELECT id FROM jobs WHERE parent_id=? AND status='queued'", (job_id,))]
+                for pid in dropped:
+                    conn.execute("UPDATE jobs SET status='canceled', finished_at=? WHERE id=?",
+                                  (_now(), pid))
             conn.commit()
             proc = _running_procs.get(job_id)
             if proc is not None:

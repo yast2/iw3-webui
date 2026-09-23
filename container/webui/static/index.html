@@ -136,6 +136,21 @@
   .searchmeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-top:8px}
   .searchmeta button{background:none;border:none;color:var(--sel);font-family:var(--mono);
     font-size:11px;padding:0 2px;cursor:pointer}
+  .cmpfile{font-family:var(--mono);font-size:12.5px;color:var(--sel);word-break:break-all;
+    padding:9px 12px;border:1px dashed var(--line);border-radius:8px;background:var(--inset)}
+  .cmpfile.none{color:var(--faint)}
+  .sidebox{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:var(--inset)}
+  .sidebox .sidehead{font-family:var(--mono);font-size:11px;letter-spacing:1px;
+    text-transform:uppercase;color:var(--accent)}
+  .sidebox .checkline{margin-top:8px;font-size:12.5px}
+  .fullname{font-family:var(--mono);font-size:11.5px;color:var(--muted);word-break:break-all;
+    margin-top:5px}
+  .warnline{margin-top:10px;font-family:var(--mono);font-size:12px;color:#f0c98a;
+    background:rgba(242,193,78,.08);border:1px solid rgba(242,193,78,.3);border-radius:7px;
+    padding:8px 11px}
+  details.secondary{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}
+  details.secondary summary{cursor:pointer;font-size:13px;color:var(--muted)}
+  .tag{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:4px}
   .checkline{display:flex;align-items:center;gap:9px;margin-top:12px;font-size:13.5px}
   .checkline input{width:auto;margin:0;accent-color:var(--accent)}
   .checkline label{color:var(--text);cursor:pointer}
@@ -393,21 +408,55 @@
       </div>
     </section>
 
-    <!-- COMPARE (only when there are two previews to compare) -->
-    <section class="panel" id="comparePanel" hidden>
-      <div class="phead"><span class="idx">··</span><h2>Compare two previews in one file</h2>
-        <span class="hint">runs beside the queue</span></div>
+    <!-- COMPARE -->
+    <section class="panel" id="comparePanel">
+      <div class="phead"><span class="idx">··</span><h2>Compare two levels of this file</h2>
+        <span class="hint">previews + comparison, one button</span></div>
       <div class="pbody">
-        <div class="help" id="compareIntro"></div>
+        <div class="cmpfile none" id="cmpFile">Select a file above first.</div>
+        <div class="grid2" style="margin-top:4px">
+          <div class="field"><div class="sidebox">
+            <div class="sidehead">A</div>
+            <select id="cmpLevelA" style="margin-top:6px"></select>
+            <div id="cmpOptsA"></div>
+          </div></div>
+          <div class="field"><div class="sidebox">
+            <div class="sidehead">B</div>
+            <select id="cmpLevelB" style="margin-top:6px"></select>
+            <div id="cmpOptsB"></div>
+          </div></div>
+        </div>
         <div class="grid2 grid3">
-          <div class="field"><label for="cmpA">A</label><select id="cmpA"></select></div>
-          <div class="field"><label for="cmpB">B</label><select id="cmpB"></select></div>
           <div class="field"><label for="cmpLayout">Arrangement</label><select id="cmpLayout"></select></div>
+          <div class="field"><label for="cmpWindow">Which minute</label>
+            <select id="cmpWindow">
+              <option value="auto">Pick it automatically (once, for both)</option>
+              <option value="manual">Start at a time I choose</option>
+            </select></div>
+          <div class="field" id="cmpStartField" hidden><label for="cmpStart">Start at</label>
+            <input type="text" id="cmpStart" placeholder="mm:ss or seconds"></div>
         </div>
-        <div id="compareHelp" class="help"></div>
+        <div id="cmpEstimate" class="note"></div>
         <div class="actions" style="margin-top:14px">
-          <button class="btn ghost" id="btnCompare">Build the comparison</button>
+          <button class="btn" id="btnCompareFile" disabled>Queue both previews and the comparison</button>
         </div>
+        <div id="compareHelp" class="help" style="margin-top:12px"></div>
+        <div class="help" id="compareIntro"></div>
+
+        <details class="secondary" id="compareExisting">
+          <summary>Or: compare two previews that already exist</summary>
+          <div class="help">Stitches two finished previews without converting anything. They can be of
+            any file &mdash; check the full names below.</div>
+          <div class="field"><label for="cmpA">A</label><select id="cmpA"></select>
+            <div class="fullname" id="cmpAName"></div></div>
+          <div class="field"><label for="cmpB">B</label><select id="cmpB"></select>
+            <div class="fullname" id="cmpBName"></div></div>
+          <div id="cmpMismatch" class="warnline" hidden></div>
+          <div id="compareHelpExisting" class="help"></div>
+          <div class="actions" style="margin-top:12px">
+            <button class="btn ghost" id="btnCompare">Build the comparison from these two</button>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -563,7 +612,7 @@ function selectEntry(entry) {
   setStep(2, [1]);
   // The quality levels quote a time for *this* file, so they have to be
   // recomputed the moment the file changes.
-  if (quality) refreshEstimates();
+  if (quality) { refreshEstimates(); renderCompareFile(); }
 }
 
 // --- Search ------------------------------------------------------------
@@ -664,7 +713,6 @@ function renderSearch(data) {
     runSearch();
   };
   markSelected();
-  if (quality) refreshEstimates();
 }
 
 // --- Quality levels ----------------------------------------------------
@@ -749,9 +797,7 @@ function renderQuality() {
     + `That is not padding: the convergence estimator carries a moving average across `
     + `frames, so a window started cold is not the same recipe as the full run.`;
 
-  const layouts = document.getElementById("cmpLayout");
-  layouts.innerHTML = quality.compare_layouts
-    .map(l => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
+  renderCompareControls();
 
   // Header pill: is the multi-stage pipeline reachable from this container?
   const dot = document.getElementById("dot-chain");
@@ -866,6 +912,8 @@ function parseTime(text) {
   return parts.reduce((acc, p) => acc * 60 + p, 0);
 }
 
+document.getElementById("stereoFormat").addEventListener("change", () => renderCompareHelp());
+
 document.getElementById("windowMode").onchange = (e) => {
   document.getElementById("windowStartField").hidden = e.target.value !== "manual";
 };
@@ -965,18 +1013,222 @@ async function submitJob(mode) {
 document.getElementById("btnConvert").onclick = () => submitJob("convert");
 document.getElementById("btnPreview").onclick = () => submitJob("preview");
 
-// --- Comparing two previews --------------------------------------------
-// Offered only when there are two to compare, because an empty pair of
-// dropdowns is a question the page cannot answer.
+// --- Comparing two levels of the selected file ------------------------
+// One button: the server works out the preview window once, queues preview A
+// and preview B on exactly that window (or reuses finished ones), and builds
+// the comparison by itself when both are done. The old "pick two existing
+// previews" path is kept below it, labelled as what it is.
+const LAYOUT_KEY = "iw3.compareLayout";
 let comparable = [];
 
+function compareLevels() {
+  return quality.levels.filter(lv => lv.available && lv.id !== "custom");
+}
+
+function sideSpec(side) {
+  const lv = document.getElementById("cmpLevel" + side).value;
+  const level = quality.levels.find(l => l.id === lv) || {};
+  const box = id => document.getElementById(`cmp_${id}_${side}`);
+  return {
+    level: lv,
+    chain: !!level.chain,
+    flow: !!(level.chain && box("flow")?.checked),
+    upscale: !!(level.chain && box("upscale")?.checked),
+  };
+}
+
+function specName(spec) {
+  const lv = quality.levels.find(l => l.id === spec.level) || {};
+  return (lv.label || spec.level) + (spec.flow ? " +flow" : "") + (spec.upscale ? " +4K" : "");
+}
+
+function renderCompareControls() {
+  const levels = compareLevels();
+  for (const [side, dflt] of [["A", "fast"], ["B", "standard"]]) {
+    const sel = document.getElementById("cmpLevel" + side);
+    sel.innerHTML = levels.map(lv => `<option value="${lv.id}">${esc(lv.label)}</option>`).join("");
+    sel.value = levels.some(l => l.id === dflt) ? dflt : (levels[side === "A" ? 0 : levels.length - 1]?.id || "");
+    document.getElementById("cmpOpts" + side).innerHTML = quality.options.map(op => `
+      <div class="checkline"><input type="checkbox" id="cmp_${op.id}_${side}">
+        <label for="cmp_${op.id}_${side}">${esc(op.id === "upscale" ? "4K (denoise + 2x upscale)" : op.label)}</label></div>`).join("");
+    sel.onchange = () => { syncCompareSwitches(); renderCompareFile(); };
+    for (const op of quality.options) {
+      document.getElementById(`cmp_${op.id}_${side}`).onchange = renderCompareFile;
+    }
+  }
+  const layouts = document.getElementById("cmpLayout");
+  layouts.innerHTML = quality.compare_layouts
+    .map(l => `<option value="${l.id}">${esc(l.label)}</option>`).join("");
+  // His last choice, remembered in this browser only.
+  const saved = localStorage.getItem(LAYOUT_KEY);
+  layouts.value = quality.compare_layouts.some(l => l.id === saved) ? saved : "aba";
+  layouts.onchange = () => { localStorage.setItem(LAYOUT_KEY, layouts.value); renderCompareHelp(); };
+  document.getElementById("cmpWindow").onchange = (e) => {
+    document.getElementById("cmpStartField").hidden = e.target.value !== "manual";
+  };
+  document.getElementById("compareIntro").innerHTML =
+    "Both previews are already side-by-side stereo, so they are interleaved "
+    + "<strong>per eye</strong>: the left eye gets A's left eye and B's left eye, the "
+    + "right eye gets both right eyes. Laying two stereo frames next to each other "
+    + "instead would hand the headset one recipe per eye.";
+  syncCompareSwitches();
+}
+
+function syncCompareSwitches() {
+  for (const side of ["A", "B"]) {
+    const lv = quality.levels.find(l => l.id === document.getElementById("cmpLevel" + side).value) || {};
+    for (const op of quality.options) {
+      const box = document.getElementById(`cmp_${op.id}_${side}`);
+      box.disabled = !lv.chain;
+      if (!lv.chain) box.checked = false;
+      box.parentElement.style.opacity = lv.chain ? "" : ".45";
+      box.parentElement.title = lv.chain ? "" : "only with a pipeline level (Economical or Standard)";
+    }
+  }
+}
+
+// Per-eye and total frame size of a comparison, from the frame size of one
+// preview (a side-by-side frame: two eyes next to each other).
+function compareSizes(frameW, frameH) {
+  const eyeW = Math.round(frameW / 2), eyeH = frameH;
+  return {
+    aba: { eye: `${eyeW}×${eyeH}`, total: `${frameW}×${frameH}` },
+    stacked: { eye: `${eyeW}×${eyeH * 2}`, total: `${frameW}×${eyeH * 2}`, ratio: `${eyeW}:${eyeH * 2}` },
+  };
+}
+
+function helpText(sz, basis) {
+  if (!sz) {
+    return "<strong>A / B / A</strong> keeps the geometry exactly as it is and shows the same "
+      + "window three times. <strong>A above B</strong> doubles the height of each eye.";
+  }
+  return "<strong>A / B / A</strong> keeps the geometry exactly as it is and shows the same "
+    + `window three times (${sz.aba.eye} per eye, ${sz.aba.total} in all). It is how every recipe `
+    + "question was actually settled: seeing the change twice, and in both directions, finds "
+    + "differences that sitting side by side does not.<br>"
+    + `<strong>A above B</strong> puts both in view at once: <strong>${sz.stacked.eye} per eye, `
+    + `${sz.stacked.total} in all</strong> (${esc(basis)}). Each recipe keeps its full picture, `
+    + "but each eye is then twice as tall as it is used to, and a player that assumes a normal "
+    + "aspect ratio per eye will squash or stretch it.";
+}
+
+// The frame size the previews will have, worked out from the source. Only
+// full and half side-by-side are side by side in the usual sense.
+let compareSource = null;   // {width, height} of the selected file
+
+function previewFrameSize() {
+  if (!compareSource || !compareSource.width) return null;
+  const fmt = document.getElementById("stereoFormat").value;
+  const w = compareSource.width, h = compareSource.height;
+  if (fmt === "half_sbs") return [w, h];
+  if (fmt === "full_sbs" || fmt === "cross_eyed") return [w * 2, h];
+  return null;
+}
+
+function renderCompareHelp() {
+  const f = previewFrameSize();
+  document.getElementById("compareHelp").innerHTML = helpText(
+    f ? compareSizes(f[0], f[1]) : null,
+    compareSource ? `from the ${compareSource.width}×${compareSource.height} source` : "");
+}
+
+let compareEstSeq = 0;
+async function renderCompareFile() {
+  const box = document.getElementById("cmpFile");
+  const btn = document.getElementById("btnCompareFile");
+  const est = document.getElementById("cmpEstimate");
+  const file = selected && selected.type === "file" ? selected : null;
+  box.classList.toggle("none", !file);
+  box.textContent = file ? "/input/" + file.path : "Select a file above first — the comparison is made from it.";
+  btn.disabled = !file;
+  refreshComparableWarning();
+  if (!file) { compareSource = null; est.textContent = ""; renderCompareHelp(); return; }
+  const a = sideSpec("A"), b = sideSpec("B");
+  btn.textContent = `Queue ${specName(a)} and ${specName(b)} previews and the comparison`;
+  const seq = ++compareEstSeq;
+  let ea, eb;
+  try {
+    [ea, eb] = await Promise.all([a, b].map(sp => api("/estimate?" + new URLSearchParams(
+      { path: file.path, mode: "preview", flow: sp.flow, upscale: sp.upscale }))));
+  } catch (e) { return; }
+  if (seq !== compareEstSeq) return;
+  compareSource = { width: ea.width, height: ea.height };
+  const t = (e, sp) => {
+    const v = e.levels[sp.level];
+    return v && v.seconds !== null ? `${v.extrapolated ? "≈" : "~"}${fmtDuration(v.seconds)}` : "not modelled";
+  };
+  est.innerHTML = `Preview A (${esc(specName(a))}) ${t(ea, a)}, preview B (${esc(specName(b))}) `
+    + `${t(eb, b)}, one after the other in the queue, then about a minute to build the file. `
+    + `A finished preview of this file at the same level and window is reused rather than run again.`;
+  renderCompareHelp();
+}
+
+document.getElementById("btnCompareFile").onclick = async () => {
+  if (!selected || selected.type !== "file") return;
+  const a = sideSpec("A"), b = sideSpec("B");
+  let start = null;
+  if (document.getElementById("cmpWindow").value === "manual") {
+    start = parseTime(document.getElementById("cmpStart").value);
+    if (start === null || isNaN(start)) { alert("Give the start of the window as seconds or mm:ss."); return; }
+  }
+  const body = {
+    input_path: selected.path,
+    level_a: a.level, flow_a: a.flow, upscale_a: a.upscale,
+    level_b: b.level, flow_b: b.flow, upscale_b: b.upscale,
+    layout: document.getElementById("cmpLayout").value,
+    stereo_format: document.getElementById("stereoFormat").value,
+    preview_start_sec: start,
+  };
+  try {
+    await api("/compare/file", { method: "POST", headers: { "Content-Type": "application/json" },
+                                 body: JSON.stringify(body) });
+  } catch (e) {
+    alert("Could not queue the comparison:\n\n" + e.message);
+    return;
+  }
+  setStep(4, [1, 2, 3]);
+  refreshJobs();
+};
+
+// --- The secondary path: two previews that already exist ---------------
 function describePreview(p) {
   const bits = [p.quality_label];
   if (p.flow) bits.push("+flow");
   if (p.upscale) bits.push("+4K");
   const at = p.preview_start_sec === null ? "auto window"
            : `from ${fmtDuration(p.preview_start_sec)}`;
-  return `${bits.join(" ")} · ${p.input_path.split("/").pop()} · ${at}`;
+  return `${bits.join(" ")} · ${at} · ${p.input_path.split("/").pop()}`;
+}
+
+function fullName(p) {
+  if (!p) return "";
+  return `${describePreview(p).split(" · ").slice(0, 2).join(" · ")} · /input/${p.input_path}`
+    + (p.width ? ` · ${p.width}×${p.height}` : "");
+}
+
+function refreshComparableWarning() {
+  const pa = comparable.find(p => p.id === document.getElementById("cmpA").value);
+  const pb = comparable.find(p => p.id === document.getElementById("cmpB").value);
+  document.getElementById("cmpAName").textContent = fullName(pa);
+  document.getElementById("cmpBName").textContent = fullName(pb);
+  const warn = [];
+  const file = selected && selected.type === "file" ? selected.path : null;
+  if (pa && pb && pa.input_path !== pb.input_path) {
+    warn.push("A and B are previews of two different files, so this compares two films rather than two recipes.");
+  }
+  const off = [["A", pa], ["B", pb]].filter(([, p]) => p && file && p.input_path !== file);
+  if (off.length) {
+    const names = [...new Set(off.map(([, p]) => p.input_path.split("/").pop()))];
+    warn.push(`${off.length === 2 ? "Both previews are" : `Preview ${off[0][0]} is`} of `
+      + `“${names.join("” and “")}”, not of the selected file. To compare the selected file, `
+      + `use the button above.`);
+  }
+  const w = document.getElementById("cmpMismatch");
+  w.hidden = !warn.length;
+  w.textContent = warn.join(" ");
+  const sz = pa && pa.width ? compareSizes(pa.width, pa.height) : null;
+  document.getElementById("compareHelpExisting").innerHTML =
+    helpText(sz, pa && pa.width ? `from the ${pa.width}×${pa.height} previews` : "");
 }
 
 async function refreshComparable() {
@@ -984,29 +1236,18 @@ async function refreshComparable() {
   try { next = await api("/comparable"); } catch (e) { return; }
   const changed = JSON.stringify(next.map(p => p.id)) !== JSON.stringify(comparable.map(p => p.id));
   comparable = next;
-  const panel = document.getElementById("comparePanel");
-  panel.hidden = comparable.length < 2;
-  if (panel.hidden || !changed) return;
+  const box = document.getElementById("compareExisting");
+  box.hidden = comparable.length < 2;
+  if (box.hidden || !changed) return;
   for (const [id, pick] of [["cmpA", 0], ["cmpB", 1]]) {
     const sel = document.getElementById(id);
     const keep = sel.value;
     sel.innerHTML = comparable.map(p =>
-      `<option value="${p.id}">${esc(describePreview(p))}</option>`).join("");
+      `<option value="${p.id}" title="/input/${esc(p.input_path)}">${esc(describePreview(p))}</option>`).join("");
     sel.value = comparable.some(p => p.id === keep) ? keep : (comparable[pick]?.id || "");
+    sel.onchange = refreshComparableWarning;
   }
-  document.getElementById("compareIntro").innerHTML =
-    "Both previews are already side-by-side stereo, so they are interleaved "
-    + "<strong>per eye</strong>: the left eye gets A's left eye and B's left eye, the "
-    + "right eye gets both right eyes. Laying two stereo frames next to each other "
-    + "instead would hand the headset one recipe per eye.";
-  document.getElementById("compareHelp").innerHTML =
-    "<strong>A / B / A</strong> keeps the geometry exactly as it is and shows the same "
-    + "window three times. It is how every recipe question was actually settled: seeing "
-    + "the change twice, and in both directions, finds differences that sitting side by "
-    + "side does not.<br>"
-    + "<strong>A above B</strong> puts both in view at once, 1920×2160 per eye. Vertical "
-    + "rather than horizontal so each keeps a full 1920×1080 picture &ndash; but each eye "
-    + "is then 16:18, and a player that assumes 16:9 per eye will stretch it.";
+  refreshComparableWarning();
 }
 
 document.getElementById("btnCompare").onclick = async () => {
@@ -1059,6 +1300,18 @@ function qualityCell(j) {
 function progressCell(j) {
   if (j.status === "done") {
     return `<div class="bar"><span style="width:100%"></span></div>`;
+  }
+  // A comparison made from a file waits, unqueued, for its two previews.
+  if (j.mode === "compare" && j.status === "queued" && j.progress) {
+    const w = j.progress;
+    if (w.phase === "wait") {
+      const pct = 50 * w.done;
+      return `<div class="bar"><span style="width:${pct}%;background:var(--faint)"></span></div>`
+        + `<div class="progress-meta">waiting for previews, ${w.done} of ${w.of} done`
+        + (w.waiting_for.length ? ` · next: ${esc(w.waiting_for.join(", "))}` : "") + `</div>`;
+    }
+    return `<div class="bar indeterminate"><span></span></div>`
+      + `<div class="progress-meta">choosing one window for both previews…</div>`;
   }
   if (j.status !== "running") return "";
   const p = j.progress;
@@ -1237,7 +1490,7 @@ async function refreshJobs() {
     tr.innerHTML = `
       <td class="pos" data-label="Queue">${pos}</td>
       <td data-label="Created">${esc(created)}</td>
-      <td data-label="Mode">${esc(j.mode)}</td>
+      <td data-label="Mode">${esc(j.mode)}${j.parent_id ? '<span class="tag" title="queued by a comparison">for compare</span>' : ""}</td>
       <td data-label="Quality">${qualityCell(j)}</td>
       <td class="path" data-label="Input" title="${esc(j.output_path || j.input_path)}">${esc(j.output_path ? j.output_path.split("/").pop() : j.input_path)}</td>
       <td data-label="Format">${esc(j.stereo_format)}</td>
@@ -1359,6 +1612,7 @@ function showLog(jobId) {
   quality = await api("/quality");
   renderSettingsForm();
   renderQuality();
+  renderCompareFile();
   await loadBrowser("");
   initQueueDnd();
   await refreshJobs();
