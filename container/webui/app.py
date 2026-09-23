@@ -580,6 +580,11 @@ _init_db()
 
 # job_id -> asyncio.subprocess.Process, for cancellation of the current job
 _running_procs: dict[str, asyncio.subprocess.Process] = {}
+# Jobs somebody pressed Cancel on while they ran. A cancelled process exits
+# non-zero (143 from the pipeline, -15 from iw3), and without this record the
+# job would be filed as failed - with its scratch kept "for inspection" as if
+# something had gone wrong. In memory only: a restart re-queues running jobs.
+_cancel_requested: set[str] = set()
 # job_id -> set of asyncio.Queue, for SSE log tailing
 _log_subscribers: dict[str, set] = {}
 # job_id -> progress dict, parsed live from iw3's tqdm output. In memory only:
@@ -1759,6 +1764,11 @@ async def _run_job(job_id):
             try:
                 await _run_compare(job_id, row, logf)
             except Exception as e:
+                if job_id in _cancel_requested:
+                    _cancel_requested.discard(job_id)
+                    shutil.rmtree(_compare_dir(job_id), ignore_errors=True)
+                    await _finish_canceled(job_id, logf)
+                    return
                 await _write_log(job_id, logf, f"\n[job failed, {e}]\n")
                 with _db() as conn:
                     conn.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE id=?",
@@ -1792,6 +1802,13 @@ async def _run_job(job_id):
                 if is_chain:
                     await _check_clip_frames(job_id, clip_path, logf)
             except Exception as e:
+                if job_id in _cancel_requested:
+                    # Cancelled during the scan or the cut: nothing of it is
+                    # worth keeping.
+                    _cancel_requested.discard(job_id)
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    await _finish_canceled(job_id, logf)
+                    return
                 # Report it as a finished-and-failed job rather than letting it
                 # escape to the worker loop: an open log viewer waits for the
                 # end marker below and would otherwise hang on a dead job.
@@ -1808,6 +1825,14 @@ async def _run_job(job_id):
         else:
             argv = _build_argv(row)
 
+        if job_id in _cancel_requested:
+            # Cancelled in the gap between cutting the clip and starting the
+            # conversion, when there was no process to signal.
+            _cancel_requested.discard(job_id)
+            if row["mode"] == "preview":
+                shutil.rmtree(_preview_dir(job_id), ignore_errors=True)
+            await _finish_canceled(job_id, logf)
+            return
         await _write_log(job_id, logf, f"$ {' '.join(argv)}\n")
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(NUNIF_DIR),
@@ -1871,13 +1896,30 @@ async def _run_job(job_id):
             _running_procs.pop(job_id, None)
             _job_progress.pop(job_id, None)
 
+    # A job that exits 0 is done even if Cancel was pressed a moment too late;
+    # anything else after a Cancel is a cancellation, not a failure.
+    canceled = returncode != 0 and job_id in _cancel_requested
+    _cancel_requested.discard(job_id)
+    if canceled:
+        # Unlike a failure, a cancellation has nothing to inspect: its scratch
+        # (frames, depth maps - 11 GB after half an hour of a full film) goes.
+        with open(log_path, "a") as logf:
+            if is_chain:
+                await _write_log(job_id, logf, f"[pipeline] canceled, removing scratch "
+                                               f"{_chain_work_dir(job_id)}\n")
+                await asyncio.to_thread(shutil.rmtree, _chain_work_dir(job_id), True)
+            if row["mode"] == "preview":
+                await asyncio.to_thread(shutil.rmtree, _preview_dir(job_id), True)
+            await _finish_canceled(job_id, logf)
+        return
     status = "done" if returncode == 0 else "failed"
     if is_chain:
         work = _chain_work_dir(job_id)
         if status == "done":
             # Tens of thousands of extracted frames and as many depth maps -
             # keeping them would fill the output volume within a few jobs.
-            shutil.rmtree(work, ignore_errors=True)
+            # Off the event loop: on the array this takes over half a minute.
+            await asyncio.to_thread(shutil.rmtree, work, True)
         elif work.exists():
             await _publish_log(job_id, f"[pipeline] scratch kept for inspection: {work}\n")
     output_path = None
@@ -1962,10 +2004,23 @@ async def _worker_loop():
         try:
             await _run_job(row["id"])
         except Exception as e:
+            canceled = row["id"] in _cancel_requested
+            _cancel_requested.discard(row["id"])
             with _db() as conn:
-                conn.execute("UPDATE jobs SET status='failed', finished_at=?, error=? WHERE id=?",
-                              (_now(), str(e), row["id"]))
+                conn.execute("UPDATE jobs SET status=?, finished_at=?, error=? WHERE id=?",
+                              ("canceled" if canceled else "failed", _now(),
+                               None if canceled else str(e), row["id"]))
                 conn.commit()
+
+
+async def _finish_canceled(job_id, logf):
+    """File a job as canceled - no error, because nothing went wrong."""
+    await _write_log(job_id, logf, "\n[job canceled]\n")
+    with _db() as conn:
+        conn.execute("UPDATE jobs SET status='canceled', finished_at=?, error=NULL, "
+                      "output_path=NULL WHERE id=?", (_now(), job_id))
+        conn.commit()
+    await _publish_log(job_id, "__EOF__")
 
 
 async def _compare_loop():
@@ -2544,12 +2599,24 @@ async def cancel_job(job_id: str):
         if row["status"] == "queued":
             conn.execute("UPDATE jobs SET status='canceled', finished_at=? WHERE id=?", (_now(), job_id))
             conn.commit()
-            return {"ok": True}
+            proc = _running_procs.get(job_id)
+            if proc is not None:
+                # The comparison's window scan.
+                _cancel_requested.add(job_id)
+                proc.send_signal(signal.SIGTERM)
+            return {"ok": True, "canceled_previews": dropped}
+        if row["status"] != "running":
+            raise HTTPException(409, "job is not queued or running")
+    # Remembered before the signal goes out, so the job's own ending reads it
+    # as a cancellation however quickly the process dies.
+    _cancel_requested.add(job_id)
     proc = _running_procs.get(job_id)
     if proc is not None:
         proc.send_signal(signal.SIGTERM)
         return {"ok": True, "note": "SIGTERM sent to running job"}
-    raise HTTPException(409, "job is not queued or running")
+    # Between two processes (a preview between cutting and converting): the
+    # job checks the record before it starts the next one.
+    return {"ok": True, "note": "cancel recorded; the job stops before its next step"}
 
 
 @app.delete("/api/jobs/{job_id}")
