@@ -1195,13 +1195,15 @@ async def _publish_log(job_id, line):
         q.put_nowait(line)
 
 
-async def _run_logged(job_id, argv, logf):
+async def _run_logged(job_id, argv, logf, shown=None):
     """Run a helper process, streaming its output into the job log.
 
     Registered in _running_procs like the conversion itself, so cancelling a
     job during clip extraction works the same way it does mid-conversion.
+    `shown` replaces the command line in the log, for a helper whose argv is
+    a whole script.
     """
-    await _write_log(job_id, logf, f"$ {' '.join(argv)}\n")
+    await _write_log(job_id, logf, f"$ {shown or ' '.join(argv)}\n")
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
@@ -1368,9 +1370,16 @@ async def _extract_preview_clip(job_id, src: Path, dest: Path, plan, logf):
     # arrive in mkv/wmv containers, and a minute of AAC costs no measurable
     # time. That keeps the fallback below for the one case that really needs
     # it: a video codec mp4 cannot hold at all.
+    #
+    # No -avoid_negative_ts make_zero. The AAC encoder starts 1024 samples
+    # early, and make_zero pays for that by pushing the *video* back too -
+    # 21 ms with 48 kHz sound. -t then cut the last frame down to a 12 ms stub,
+    # iw3's frame-rate filter rounded the stub away, and the pipeline stopped
+    # at stage 3 one depth map short (23.09., a clip with MP3 sound). Left to
+    # itself, mp4 records the priming in an edit list, and picture and sound
+    # both start at 0.
     rc = await _run_logged(job_id, base + window + maps +
-                            ["-c:v", "copy", "-c:a", "aac",
-                             "-avoid_negative_ts", "make_zero", str(dest)], logf)
+                            ["-c:v", "copy", "-c:a", "aac", str(dest)], logf)
     if rc < 0:
         # Killed by a signal - that is a cancellation, not a bad source.
         raise RuntimeError(f"preview extraction terminated by signal {-rc}")
@@ -1388,6 +1397,57 @@ async def _extract_preview_clip(job_id, src: Path, dest: Path, plan, logf):
     if rc != 0 or not dest.exists() or dest.stat().st_size == 0:
         raise RuntimeError(f"preview clip extraction failed (ffmpeg exit code {rc})")
     return plan["lead"] + drift
+
+
+# ---------------------------------------------------------------------------
+# Will iw3 see every frame of the clip?
+#
+# The pipeline checks its stages against each other by frame count. Stage 1
+# extracts with ffmpeg and -fps_mode passthrough; the VDA stage decodes
+# through iw3, which always pushes frames through an fps filter at the
+# source's own rate. A frame whose timing does not fit that filter is dropped,
+# and the pipeline then stops at stage 3 - correctly, but only after DepthPro
+# has spent a quarter of an hour. So the same decode runs here first, on the
+# CPU, the way iw3's hook_frame runs it: one pull per frame pushed, then a
+# drain at the end. A one-minute clip takes seconds.
+_FRAME_CHECK = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+import av
+from nunif.utils.video import FixedFPSFilter, convert_known_fps, get_fps, safe_decode
+container = av.open(sys.argv[2])
+stream = container.streams.video[0]
+if stream.codec.name != "hevc":
+    stream.thread_type = "AUTO"
+fps_filter = FixedFPSFilter(stream, fps=convert_known_fps(get_fps(stream)))
+decoded = passed = 0
+for packet in container.demux([stream]):
+    for frame in safe_decode(packet):
+        decoded += 1
+        if fps_filter.update(frame) is not None:
+            passed += 1
+while fps_filter.update(None) is not None:
+    passed += 1
+container.close()
+print(f"[preview] frame check: {decoded} decoded, {passed} through iw3's "
+      f"frame-rate filter", flush=True)
+sys.exit(0 if decoded == passed else 3)
+'''
+
+
+async def _check_clip_frames(job_id, clip: Path, logf):
+    """Stop a pipeline preview before it starts if iw3 would lose frames."""
+    rc = await _run_logged(job_id, [sys.executable, "-c", _FRAME_CHECK,
+                                     str(NUNIF_DIR), str(clip)], logf,
+                            shown=f"frame check on {clip.name}")
+    if rc < 0:
+        raise RuntimeError(f"frame check terminated by signal {-rc}")
+    if rc == 3:
+        raise RuntimeError("iw3 would see fewer frames of the preview clip than ffmpeg "
+                           "does, so the pipeline would stop at stage 3 - stopped "
+                           "before it started")
+    if rc != 0:
+        raise RuntimeError(f"frame check failed (exit code {rc})")
 
 
 # ---------------------------------------------------------------------------
@@ -1729,6 +1789,8 @@ async def _run_job(job_id):
                 preview_plan = await _preview_plan(job_id, src, row, logf)
                 preview_head = await _extract_preview_clip(
                     job_id, src, clip_path, preview_plan, logf)
+                if is_chain:
+                    await _check_clip_frames(job_id, clip_path, logf)
             except Exception as e:
                 # Report it as a finished-and-failed job rather than letting it
                 # escape to the worker loop: an open log viewer waits for the
