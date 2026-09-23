@@ -254,40 +254,135 @@ STEREO_FORMATS = [
 # one a parameter set that was actually measured rather than assembled from
 # plausible-looking defaults.
 #
-# Every level therefore carries its own runtime model, and the UI turns that
+# Every level therefore names a runtime model (`costs`: "single" for one iw3
+# process, "chain" for the pipeline, None for custom), and the UI turns that
 # into a time for the video in front of the user instead of quoting the hours
-# the measurement took. Two rules for what goes in `costs`:
+# the measurement took.
 #
-#   * `fixed_sec` is per job, `sec_per_frame` scales with the frames actually
-#     processed. Both come from the same two-point measurements the queue's
-#     other estimates use (see "Estimating queued jobs" below).
-#   * `gpu` and `cpu` are added. For a single `iw3` process the encode hides
-#     behind the conversion and `cpu` is 0 - the measured wall clock is
-#     already in `gpu`. For the pipeline the stages run one after another, so
-#     the CPU-bound stage is time the user waits.
-#
-# Measured on an Intel Arc Pro B60 over 21,606 frames of 1920x1080 video
-# (12 min at 29.97 fps), each figure from a run of the full length rather than
-# extrapolated from a short clip. `notes` names what each number is, because
-# a level that quotes a GPU lower bound and a level that quotes a measured
-# wall clock are not the same kind of promise.
+# The first measurements were taken on an Intel Arc Pro B60 over 21,606 frames
+# of 1920x1080 video (12 min at 29.97 fps). The runtime model itself is below
+# ("What a job costs"); `notes` says what each level's figure rests on.
 # ---------------------------------------------------------------------------
 MEASURED_ON_FRAMES = 21606
 
-# Depth estimation at 4K costs more per frame than at HD, and not by the
-# pixel ratio: this installation's own VDA_B medians are 6.56 fps at HD
-# against 2.58 at 4K, a factor of 2.54, where the pixels alone would say 4.
-# So the levels are seeded at HD and scaled by the factor this machine
-# measured - flagged as an extrapolation wherever it is used, because no
-# level has been run end to end on a 4K source.
-RESOLUTION_FACTOR_4K = 6.56 / 2.58
+# ---------------------------------------------------------------------------
+# What a job costs
+#
+# The first model was one rate per level, measured on one 1080p film and
+# multiplied by 2.54 for anything classed as 4K. Six full pipeline runs later
+# that turned out to be wrong in three separate ways:
+#
+#   * The stages do not scale alike. DepthPro works at a fixed 1536x1536 and
+#     costs the same per frame at 1080p and 1440p (0.373-0.382 s); VDA_B
+#     barely moves either. The band swap, the warp, the encode and the frame
+#     count after it scale with the pixels (1.6-2.1x at 1440p).
+#   * "4K" was decided by height alone, so a 1080x1920 portrait clip was
+#     quoted at 4K rates. Six portrait jobs on this machine ran at exactly the
+#     HD rate (0.151-0.203 s/frame). What costs is the pixel count.
+#   * The encode stage ends with `ffprobe -count_frames` over the delivery
+#     file, which writes nothing and is in no stage's time: 1,087 s after a
+#     471 s encode on a 29,122-frame 1440p film. It is modelled here.
+#
+# So a pipeline job is costed stage by stage, each as a fixed start-up plus a
+# per-frame rate that is a straight line in the pixel count through the two
+# resolutions that have actually been run (1080p and 1440p). Outside that range
+# the line is an extrapolation and says so. The per-frame figures are means
+# over the full-length runs, not medians: the runs disagree by up to 25 % per
+# stage (a GPU shared with other work is the likely reason, not a proven one),
+# and a wait quoted too short is the more annoying error.
+#
+# Measured runs, 1080p: the validation film (21,606 frames), two films of
+# 7,906 and 9,476 frames; 1440p: one film of 29,122 frames and one preview of
+# 2,041. Fixed costs from a 300-frame run, where they dominate.
+# ---------------------------------------------------------------------------
+REF_PIXELS = 1920 * 1080
+PX_1440 = 2560 * 1440 / REF_PIXELS          # 1.778
+CHAIN_MEASURED_PX = (0.9, 1.9)              # outside this the line is extrapolated
+
+
+def _px_of(info):
+    """Source pixel count relative to 1080p (portrait and landscape alike)."""
+    w, h = (info or {}).get("width") or 0, (info or {}).get("height") or 0
+    if not w or not h:
+        return 1.0
+    return w * h / REF_PIXELS
+
+
+def _px_line(hd, q1440):
+    """s/frame(px) through the 1080p and 1440p figures, never below a quarter of HD."""
+    slope = (q1440 - hd) / (PX_1440 - 1.0)
+    return lambda px: max(0.25 * hd, hd + slope * (px - 1.0))
+
+
+# One entry per stage the pipeline script announces, in its order. `log` is
+# the file the stage's own progress bar goes to (log/<name> under the job's
+# scratch directory); `match` recognises the stage from its marker label, so
+# the script's wording can change without breaking the lookup.
+CHAIN_STAGES = {
+    "bilder":    {"match": r"^Bilder",     "log": None,          "fixed": 1.0,
+                  "rate": _px_line(0.00325, 0.0054)},
+    "hoch":      {"match": r"^waifu2x",    "log": "hoch.txt",    "fixed": 0.0,
+                  "rate": _px_line(0.870, 0.870 * PX_1440), "unmeasured": True},
+    "feinband":  {"match": r"^DepthPro",   "log": "pro.txt",     "fixed": 40.0,
+                  "rate": _px_line(0.3741, 0.3820)},
+    "vda":       {"match": r"^VDA_B",      "log": "vda.txt",     "fixed": 15.0,
+                  "rate": _px_line(0.1145, 0.1229)},
+    "band":      {"match": r"^Bandtausch", "log": "band.txt",    "fixed": 8.0,
+                  "rate": _px_line(0.0523, 0.0940)},
+    "fluss":     {"match": r"^Fluss",      "log": "fluss.txt",   "fixed": 0.0,
+                  "rate": _px_line(0.1777, 0.1777 * PX_1440), "unmeasured": True},
+    "export":    {"match": r"^Export",     "log": "exp_*.txt",   "fixed": 1.0,
+                  "rate": _px_line(0.0017, 0.0015)},
+    "warp":      {"match": r"^Warp",       "log": "warp_*.txt",  "fixed": 30.0,
+                  "rate": _px_line(0.0986, 0.1700)},
+    # The encode itself plus the ffprobe frame count after it; neither
+    # writes any progress, so this stage is always the model.
+    "kodierung": {"match": r"^Kodierung",  "log": None,          "fixed": 3.0,
+                  "rate": _px_line(0.0084 + 0.0223, 0.0140 + 0.0375)},
+}
+# DepthPro_S against DepthPro on the same 300 frames: 56 s against 115 s.
+# Economical has never run end to end through the pipeline, so every
+# economical figure is marked as an extrapolation.
+DEPTHPRO_S_FACTOR = 56.0 / 115.0
+# Deleting the scratch directory after a successful job: 36 s for 29,122
+# frames at 1440p, 5-6 s for 8-9k frames at 1080p.
+CHAIN_CLEANUP = _px_line(0.0007, 0.0012)
+# The stages that work on the warped RGB. With the upscale switch that is
+# twice the width and twice the height - never measured, so extrapolated.
+UPSCALED_STAGES = ("export", "warp", "kodierung")
+
+# The single-pass level is one iw3 process, so it is one rate - but not a
+# straight line in the pixels: medians over this machine's 218 finished
+# single-pass VDA_B jobs, by pixel count relative to 1080p.
+#     0.43 px: 0.127 s (n=9)   1.00: 0.174 (n=145)   1.78: 0.313 (n=2)   4.00: 0.375 (n=66)
+# The 1440p point rests on two jobs and one preview (0.331 s); it is the
+# least certain of the four.
+SINGLE_PASS_POINTS = [(0.43, 0.127), (1.0, 0.1737), (PX_1440, 0.3132), (4.0, 0.375)]
+SINGLE_PASS_FIXED = 50.0
+
+
+def _single_pass_rate(px):
+    pts = SINGLE_PASS_POINTS
+    if px <= pts[0][0]:
+        return max(0.08, pts[0][1] * px / pts[0][0])
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if px <= x1:
+            return y0 + (y1 - y0) * (px - x0) / (x1 - x0)
+    return pts[-1][1] * px / pts[-1][0]
+
+
+# What a preview costs on top of its frames: the motion scan over the whole
+# source when the window is picked automatically (15 s for 15,410 frames at
+# 1080p, 62-66 s for 29,122 at 1440p), and cutting and trimming the clip.
+PREVIEW_SCAN = _px_line(0.001, 0.0022)
+PREVIEW_OVERHEAD_SEC = 20.0
 
 QUALITY_LEVELS = [
     {
         "id": "fast",
         "label": "Fast",
         "chain": False,
-        "costs": {"fixed_sec": 50.0, "gpu": 0.1577, "cpu": 0.0},
+        "costs": "single",  # see "What a job costs"
         "uses": "One pass of iw3 with the small depth model VDA_B and its own "
                 "flicker smoothing. No second depth model, no post-processing "
                 "of the depth maps, nothing after the warp.",
@@ -311,7 +406,9 @@ QUALITY_LEVELS = [
             "of the pipeline and this level is not one.",
         ],
         "notes": "Measured wall clock including the x265 encode: 57 min 37 s for "
-                 "21,606 frames, cold and warm runs 0.6% apart.",
+                 "21,606 frames, cold and warm runs 0.6% apart. The time shown for "
+                 "a file comes from this machine's 218 finished single-pass jobs, "
+                 "by the file's pixel count.",
         # One iw3 process, so the level is fully expressible as a parameter set
         # and is stored as one: the job record then says exactly what ran.
         #
@@ -343,7 +440,8 @@ QUALITY_LEVELS = [
         "id": "economical",
         "label": "Economical",
         "chain": True,
-        "costs": {"fixed_sec": 35.0, "gpu": 0.3860, "cpu": 0.1611},
+        "costs": "chain",
+        "fine_model": "DepthPro_S",
         "uses": "The reduced DepthPro_S for fine structure and VDA_B with "
                 "flicker smoothing for the coarse band, swapped into one "
                 "another over a 30-frame radius, then warped with mlbw_l2.",
@@ -365,15 +463,17 @@ QUALITY_LEVELS = [
             "Still three times the cost of Fast, and slightly more flicker on "
             "still surfaces than either other level (0.0468 px).",
         ],
-        "notes": "GPU lower bound 2 h 19 plus a measured 58 min of CPU-bound "
-                 "post-processing, over 21,606 frames.",
+        "notes": "Never run end to end through the pipeline: priced as Standard "
+                 "with DepthPro_S at 0.49 of DepthPro's time (measured on 300 "
+                 "frames), so every figure for it is an extrapolation.",
     },
     {
         "id": "standard",
         "label": "Standard",
         "chain": True,
         "default": True,
-        "costs": {"fixed_sec": 54.0, "gpu": 0.5776, "cpu": 0.1389},
+        "costs": "chain",
+        "fine_model": "DepthPro",
         "uses": "DepthPro at full resolution for fine structure and VDA_B with "
                 "flicker smoothing for the coarse band, swapped into one "
                 "another over a 30-frame radius, then warped with mlbw_l2.",
@@ -398,8 +498,9 @@ QUALITY_LEVELS = [
             "0.0382). Side by side that gap sat below the threshold of being "
             "seen at all - it is a real number that buys nothing visible.",
         ],
-        "notes": "GPU lower bound 3 h 28 plus a measured 50 min of CPU-bound "
-                 "post-processing, over 21,606 frames.",
+        "notes": "Priced stage by stage from five full pipeline runs on this "
+                 "machine (1080p and 1440p). The 12-minute validation film took "
+                 "4 h 13 end to end.",
     },
     {
         "id": "custom",
@@ -432,7 +533,7 @@ QUALITY_OPTIONS = [
         "id": "flow",
         "label": "Optical flow smoothing",
         "chain_only": True,
-        "costs": {"fixed_sec": 0.0, "gpu": 0.1777, "cpu": 0.0},
+        "stage": "fluss",
         "uses": "An extra RAFT optical-flow stage that smooths each depth map "
                 "against the one before it.",
         "pros": [
@@ -452,7 +553,7 @@ QUALITY_OPTIONS = [
         "id": "upscale",
         "label": "Denoise and 2x upscale before the warp",
         "chain_only": True,
-        "costs": {"fixed_sec": 0.0, "gpu": 0.8700, "cpu": 0.0},
+        "stage": "hoch",
         "uses": "A waifu2x denoise-and-double pass over the RGB frames before "
                 "the warp. The depth maps stay at source resolution - DepthPro "
                 "works at a fixed 1536x1536 internally, so there is no extra "
@@ -487,25 +588,59 @@ def _chain_available():
     return CHAIN_SCRIPT.is_file() and os.access(CHAIN_SCRIPT, os.X_OK)
 
 
-def _level_seconds(level_id, frames, bucket, flow=False, upscale=False):
+def _chain_plan(flow=False, upscale=False):
+    """The pipeline's stages in the order the script runs and numbers them."""
+    plan = ["bilder"]
+    if upscale:
+        plan.append("hoch")
+    plan += ["feinband", "vda", "band"]
+    if flow:
+        plan.append("fluss")
+    plan += ["export", "warp", "kodierung"]
+    return plan
+
+
+def _stage_seconds(key, frames, px, level=None, upscale=False):
+    """Model wall clock of one pipeline stage over `frames` frames."""
+    st = CHAIN_STAGES[key]
+    if upscale and key in UPSCALED_STAGES:
+        px = px * 4
+    fixed, rate = st["fixed"], st["rate"](px)
+    if key == "feinband" and level and level.get("fine_model") == "DepthPro_S":
+        fixed, rate = fixed * DEPTHPRO_S_FACTOR, rate * DEPTHPRO_S_FACTOR
+    return fixed + frames * rate
+
+
+def _level_seconds(level_id, frames, px, flow=False, upscale=False):
     """Estimated wall clock for `frames` at this level, or None if unmodelled.
 
-    `bucket` is 'hd' or '4k'; see RESOLUTION_FACTOR_4K for what the 4K case is
-    worth. Returns (seconds, extrapolated).
+    `px` is the source's pixel count relative to 1080p. Returns
+    (seconds, extrapolated) - extrapolated whenever the figure rests on
+    something that has not been run on this machine at this size.
     """
     level = QUALITY_BY_ID.get(level_id)
     if not level or not level.get("costs") or not frames:
         return None, False
-    parts = [level["costs"]]
-    if level["chain"]:
-        if flow:
-            parts.append(OPTION_BY_ID["flow"]["costs"])
-        if upscale:
-            parts.append(OPTION_BY_ID["upscale"]["costs"])
-    seconds = sum(p["fixed_sec"] + frames * (p["gpu"] + p["cpu"]) for p in parts)
-    if bucket == "4k":
-        return seconds * RESOLUTION_FACTOR_4K, True
-    return seconds, False
+    if level["costs"] == "single":
+        lo, hi = SINGLE_PASS_POINTS[0][0], SINGLE_PASS_POINTS[-1][0]
+        return (SINGLE_PASS_FIXED + frames * _single_pass_rate(px),
+                not (lo * 0.9 <= px <= hi * 1.05))
+    plan = _chain_plan(flow, upscale)
+    seconds = sum(_stage_seconds(k, frames, px, level, upscale) for k in plan)
+    seconds += frames * CHAIN_CLEANUP(px)
+    extrapolated = (not (CHAIN_MEASURED_PX[0] <= px <= CHAIN_MEASURED_PX[1])
+                    or level.get("fine_model") == "DepthPro_S"
+                    or any(CHAIN_STAGES[k].get("unmeasured") for k in plan)
+                    or upscale)
+    return seconds, extrapolated
+
+
+def _preview_extra_seconds(info, px, auto_window=True):
+    """What a preview costs besides its frames: the window scan and the clip work."""
+    extra = PREVIEW_OVERHEAD_SEC
+    if auto_window and info and info.get("duration_sec") and info.get("fps"):
+        extra += info["duration_sec"] * info["fps"] * PREVIEW_SCAN(px)
+    return extra
 
 # ---------------------------------------------------------------------------
 # Job store (SQLite under $NUNIF_HOME so the queue survives container restarts)
@@ -710,11 +845,14 @@ def _parse_chain_stage(text: str):
     m = _CHAIN_STAGE.match(text.strip("\r\n"))
     if not m:
         return None
+    label = m.group("label").strip()
     return {
         "phase": "chain",
         "stage": int(m.group("stage")),
         "stages": int(m.group("stages")),
-        "stage_label": m.group("label").strip(),
+        "stage_label": label,
+        "stage_key": _stage_key(label),
+        "stage_started": time.time(),
         "percent": None, "frames": None, "total_frames": None,
         "elapsed_sec": None, "eta_sec": None, "rate_fps": None,
     }
@@ -805,8 +943,19 @@ _calibration_checked = 0.0
 CALIBRATION_RECHECK_SEC = 15.0
 
 
-def _bucket(height):
-    return "4k" if (height or 0) >= 1600 else "hd"
+# 4K by pixel count, not by one side: a 1080x1920 portrait clip has the pixels
+# of 1080p and converts at the 1080p rate (six such jobs here, 0.151-0.203
+# s/frame). The line sits where the old height rule sat for landscape 16:9
+# (2844x1600, about 4.5 MP), so every landscape file keeps its bucket.
+BUCKET_4K_PIXELS = 4_000_000
+
+
+def _bucket(info):
+    w, h = (info or {}).get("width") or 0, (info or {}).get("height") or 0
+    if not w:
+        # A probe without a width (should not happen) falls back to the old rule.
+        return "4k" if h >= 1600 else "hd"
+    return "4k" if w * h >= BUCKET_4K_PIXELS else "hd"
 
 
 def _job_rate(row):
@@ -837,7 +986,7 @@ def _job_rate(row):
     max_fps = params.get("max_fps") or _defaults.get("max_fps") or 30
     frames = info["duration_sec"] * min(info["fps"], float(max_fps))
     model = params.get("depth_model") or _defaults.get("depth_model")
-    return model, _bucket(info.get("height")), frames / elapsed
+    return model, _bucket(info), frames / elapsed
 
 
 def _throughput():
@@ -882,6 +1031,10 @@ def _running_eta(job_row, progress):
     """
     if progress and progress.get("phase") == "convert" and progress.get("eta_sec") is not None:
         return progress["eta_sec"], False
+    if progress and progress.get("phase") == "chain":
+        left = _chain_eta(job_row, progress)
+        if left is not None:
+            return left, True
     total = _estimate_seconds(job_row)
     if total is None:
         return None, True
@@ -900,11 +1053,157 @@ def _running_eta(job_row, progress):
     return total, True
 
 
+# ---------------------------------------------------------------------------
+# Progress inside a pipeline stage
+#
+# Every stage writes its progress bar to log/<stage>.txt in the job's scratch
+# directory and nothing to stdout (the script starts each one as
+# `"$@" > "$_log" 2>&1 &`), so the stdout this app parses only ever carried
+# the stage markers. The stage
+# bar is therefore read where it is written: the tail of the current stage's
+# log, a few kilobytes, on each poll. Three shapes occur -
+#
+#   tqdm, from every iw3/waifu2x stage   "Images:  34%|###  | 5240/15410 [32:38<1:02:20,  2.72it/s]"
+#   the band swap's own counter          "  1800/2021  0.064 s/Bild  Rest 0.2 min"
+#   the flow stage's bare counter        "  1950/2021"
+#
+# Two stages write nothing at all: frame extraction (seconds) and the encode,
+# whose closing ffprobe frame count is the longest silent stretch of the job.
+# Those are the model and nothing else - and marked as such.
+#
+# 🔴 Nothing here may tick on its own. A watcher outside this app decides
+# "stuck" by whether frames/percent/elapsed move; a field that advances with
+# the wall clock would make a hung stage look alive. The time since the stage
+# began is therefore reported separately as `stage_elapsed_sec`.
+# ---------------------------------------------------------------------------
+_BAND_LINE = re.compile(r"^\s*(\d+)/(\d+)\s+([0-9.]+)\s*s/Bild\s+Rest\s+([0-9.]+)\s*min")
+_COUNT_LINE = re.compile(r"^\s*(\d+)/(\d+)\s*$")
+_CHAIN_FRAMES = re.compile(r"^\s+Bilder:\s+(\d+)\s*$")
+LOG_TAIL_BYTES = 16384
+
+
+def _stage_key(label):
+    for key, st in CHAIN_STAGES.items():
+        if re.match(st["match"], label or ""):
+            return key
+    return None
+
+
+def _stage_log_progress(job_id, key, since):
+    """Latest progress line from a stage's own log, or None."""
+    pattern = CHAIN_STAGES.get(key, {}).get("log")
+    if not pattern:
+        return None
+    logdir = _chain_work_dir(job_id) / "log"
+    try:
+        candidates = [(p.stat().st_mtime, p) for p in logdir.glob(pattern)]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    mtime, path = max(candidates)
+    # A log from before this stage started belongs to an earlier attempt.
+    if since and mtime < since - 5:
+        return None
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - LOG_TAIL_BYTES))
+            tail = f.read().decode(errors="replace")
+    except OSError:
+        return None
+    for line in reversed(re.split(r"[\r\n]+", tail)):
+        if not line.strip():
+            continue
+        parsed = _parse_progress(line)
+        if parsed and parsed.get("total_frames"):
+            return parsed
+        m = _BAND_LINE.match(line)
+        if m:
+            n, total, spf, rest = int(m[1]), int(m[2]), float(m[3]), float(m[4])
+            return {"phase": "convert", "frames": n, "total_frames": total,
+                    "percent": round(100.0 * n / total, 1) if total else None,
+                    "elapsed_sec": None, "eta_sec": rest * 60.0,
+                    "rate_fps": round(1.0 / spf, 2) if spf else None}
+        m = _COUNT_LINE.match(line)
+        if m:
+            n, total = int(m[1]), int(m[2])
+            return {"phase": "convert", "frames": n, "total_frames": total,
+                    "percent": round(100.0 * n / total, 1) if total else None,
+                    "elapsed_sec": None, "eta_sec": None, "rate_fps": None}
+    return None
+
+
+def _chain_live_progress(job_id, progress):
+    """The chain's progress with the current stage's own bar merged in."""
+    if not progress or progress.get("phase") != "chain":
+        return progress
+    out = dict(progress)
+    started = out.get("stage_started")
+    out["stage_elapsed_sec"] = round(time.time() - started) if started else None
+    out["stage_eta_sec"] = None
+    out["stage_sub"] = None
+    bar = _stage_log_progress(job_id, out.get("stage_key"), started)
+    if bar:
+        for key in ("percent", "frames", "total_frames", "elapsed_sec", "rate_fps"):
+            out[key] = bar.get(key)
+        if bar.get("phase") == "scene_detect":
+            # VDA's pre-pass: its bar is real, its remaining time is not the stage's.
+            out["stage_sub"] = "scene detection"
+        elif bar.get("eta_sec") is not None:
+            out["stage_eta_sec"] = bar["eta_sec"]
+        elif bar.get("frames") and out["stage_elapsed_sec"]:
+            # The flow counter carries no rate; the stage's own pace does.
+            done, total = bar["frames"], bar["total_frames"]
+            pace = out["stage_elapsed_sec"] / done
+            out["rate_fps"] = round(1.0 / pace, 2) if pace else None
+            out["stage_eta_sec"] = pace * (total - done)
+    out["stage_source"] = "log" if out["stage_eta_sec"] is not None else "model"
+    return out
+
+
+def _chain_eta(job_row, progress):
+    """Seconds left for a running pipeline job.
+
+    The current stage's remaining time comes from its own progress bar when it
+    has one, otherwise from the model minus the time the stage has run; the
+    stages after it are the model. A stage that overruns its model is not
+    quoted at zero - it is still running - but at a twentieth of its model.
+    """
+    try:
+        info = _probe_video(_safe_input_path(job_row["input_path"]))
+    except HTTPException:
+        info = None
+    if not info or not info.get("duration_sec") or not info.get("fps"):
+        return None
+    level = QUALITY_BY_ID.get(job_row["quality"], {})
+    flow, upscale = bool(job_row["opt_flow"]), bool(job_row["opt_upscale"])
+    px = _px_of(info)
+    frames = progress.get("chain_frames") or _job_frames(job_row, info)
+    plan = _chain_plan(flow, upscale)
+    key = progress.get("stage_key")
+    if key not in plan:
+        idx = min(max((progress.get("stage") or 1) - 1, 0), len(plan) - 1)
+        key = plan[idx]
+    idx = plan.index(key)
+    model_now = _stage_seconds(key, frames, px, level, upscale)
+    if progress.get("stage_eta_sec") is not None:
+        left = float(progress["stage_eta_sec"])
+    else:
+        ran = progress.get("stage_elapsed_sec") or 0.0
+        left = max(model_now - ran, 0.05 * model_now)
+    left += sum(_stage_seconds(k, frames, px, level, upscale) for k in plan[idx + 1:])
+    left += frames * CHAIN_CLEANUP(px)
+    if job_row["mode"] == "preview":
+        left += PREVIEW_OVERHEAD_SEC / 2   # the trim after the pipeline
+    return left
+
+
 _probe_cache: dict[tuple, dict] = {}
 
 
 def _probe_video(path: Path):
-    """Duration/fps/height for a source file. Cached on (path, size, mtime)."""
+    """Duration/fps/width/height for a source file. Cached on (path, size, mtime)."""
     try:
         st = path.stat()
     except OSError:
@@ -919,6 +1218,7 @@ def _probe_video(path: Path):
             info = {
                 "duration_sec": float(container.duration / 1_000_000) if container.duration else None,
                 "fps": float(stream.average_rate) if stream.average_rate else None,
+                "width": stream.codec_context.width,
                 "height": stream.codec_context.height,
             }
     except Exception:
@@ -940,39 +1240,51 @@ def _estimate_seconds(job_row):
     if not info or not info.get("duration_sec") or not info.get("fps"):
         return None
 
+    frames = _job_frames(job_row, info)
+    level = QUALITY_BY_ID.get(job_row["quality"], {})
+    px = _px_of(info)
+    extra = 0.0
+    if job_row["mode"] == "preview":
+        # The scan runs only when the window is left to the rule, and not at
+        # all for a source too short to hold a window.
+        auto = (job_row["preview_start_sec"] is None
+                and not _preview_frames(info)["whole_source"])
+        extra = _preview_extra_seconds(info, px, auto_window=auto)
+    # A level with a runtime model of its own is estimated from that model:
+    # it was measured as a whole recipe, which is a better description of it
+    # than a per-depth-model rate could be.
+    if level.get("costs"):
+        seconds, _ = _level_seconds(job_row["quality"], frames, px,
+                                    flow=bool(job_row["opt_flow"]),
+                                    upscale=bool(job_row["opt_upscale"]))
+        if seconds is not None:
+            return seconds + extra
     params = json.loads(job_row["params_json"])
+    bucket = _bucket(info)
+    model = params.get("depth_model") or _defaults.get("depth_model")
+    rate = (_throughput().get((model, bucket))
+            or SEED_THROUGHPUT_FPS.get((model, bucket))
+            or FALLBACK_FPS[bucket])
+    return frames / rate + extra
+
+
+def _job_frames(job_row, info):
+    """Frames a job will push through the converter."""
     level = QUALITY_BY_ID.get(job_row["quality"], {})
     # The pipeline extracts every frame of the source; max_fps is an iw3
     # argument and the pipeline is not one iw3 call.
     if level.get("chain"):
         effective_fps = info["fps"]
     else:
+        params = json.loads(job_row["params_json"])
         max_fps = params.get("max_fps") or _defaults.get("max_fps") or 30
         effective_fps = min(info["fps"], float(max_fps))
     # A preview only ever converts the extracted clip, so the source length
-    # beyond it costs nothing. Cutting the clip itself is a stream copy of a
-    # few seconds and is not worth modelling; the lead and tail frames are,
-    # because they are a tenth of the clip and they go through every stage.
+    # beyond it costs nothing. The lead and tail frames are counted, because
+    # they are a tenth of the clip and they go through every stage.
     if job_row["mode"] == "preview":
-        frames = _preview_frames(info, effective_fps)["total"]
-    else:
-        frames = info["duration_sec"] * effective_fps
-
-    bucket = _bucket(info.get("height"))
-    # A level with a runtime model of its own is estimated from that model:
-    # it was measured as a whole recipe, which is a better description of it
-    # than a per-depth-model rate could be.
-    if level.get("costs"):
-        seconds, _ = _level_seconds(job_row["quality"], frames, bucket,
-                                    flow=bool(job_row["opt_flow"]),
-                                    upscale=bool(job_row["opt_upscale"]))
-        if seconds is not None:
-            return seconds
-    model = params.get("depth_model") or _defaults.get("depth_model")
-    rate = (_throughput().get((model, bucket))
-            or SEED_THROUGHPUT_FPS.get((model, bucket))
-            or FALLBACK_FPS[bucket])
-    return frames / rate
+        return _preview_frames(info, effective_fps)["total"]
+    return info["duration_sec"] * effective_fps
 
 
 def _preview_dir(job_id) -> Path:
@@ -1869,8 +2181,16 @@ async def _run_job(job_id):
                     # tick we have actually seen.
                     if is_chain:
                         stage = _parse_chain_stage(text)
+                        frames_line = None if stage else _CHAIN_FRAMES.match(text.rstrip("\n"))
                         if stage:
+                            # The frame count is printed once, after stage 1,
+                            # and every later stage's model needs it.
+                            previous = _job_progress.get(job_id) or {}
+                            if previous.get("chain_frames"):
+                                stage["chain_frames"] = previous["chain_frames"]
                             _job_progress[job_id] = stage
+                        elif frames_line and _job_progress.get(job_id):
+                            _job_progress[job_id]["chain_frames"] = int(frames_line.group(1))
                         else:
                             parsed = _parse_progress(text)
                             if parsed:
@@ -2150,43 +2470,47 @@ def estimate(path: str = "", mode: str = "convert", flow: bool = False,
     if path.strip():
         info = _probe_video(_safe_input_path(path))
     window = None
+    auto_scan = True
     if info and info.get("duration_sec") and info.get("fps"):
         source_frames = info["duration_sec"] * info["fps"]
         if mode == "preview":
             window = _preview_frames(info)
             frames = window["total"]
+            auto_scan = not window["whole_source"]
         else:
             frames = source_frames
-        bucket = _bucket(info.get("height"))
         source = "selected file"
     else:
         # The reference the levels were measured on, so a first-time visitor
         # still sees the shape of the ladder before picking a file.
+        info = {"duration_sec": MEASURED_ON_FRAMES / 29.97, "fps": 29.97,
+                "width": 1920, "height": 1080}
         source_frames = MEASURED_ON_FRAMES
         if mode == "preview":
-            window = _preview_frames({"duration_sec": MEASURED_ON_FRAMES / 29.97,
-                                      "fps": 29.97})
+            window = _preview_frames(info)
             frames = window["total"]
         else:
             frames = source_frames
-        bucket = "hd"
         source = "reference measurement (12 min, 1080p)"
+    px = _px_of(info)
+    extra = _preview_extra_seconds(info, px, auto_scan) if mode == "preview" else 0.0
 
     levels = {}
     for lv in QUALITY_LEVELS:
-        seconds, extrapolated = _level_seconds(lv["id"], frames, bucket,
+        seconds, extrapolated = _level_seconds(lv["id"], frames, px,
                                                flow=flow, upscale=upscale)
         levels[lv["id"]] = {
-            "seconds": round(seconds) if seconds else None,
+            "seconds": round(seconds + extra) if seconds else None,
             "extrapolated": extrapolated,
         }
+    # What each switch adds, priced on Standard: the stage itself, and for the
+    # upscale also the later stages working on four times the pixels.
     options = {}
+    base, _ = _level_seconds(DEFAULT_QUALITY, frames, px)
     for op in QUALITY_OPTIONS:
-        c = op["costs"]
-        extra = c["fixed_sec"] + frames * (c["gpu"] + c["cpu"])
-        if bucket == "4k":
-            extra *= RESOLUTION_FACTOR_4K
-        options[op["id"]] = {"seconds": round(extra), "extrapolated": bucket == "4k"}
+        with_op, _ = _level_seconds(DEFAULT_QUALITY, frames, px,
+                                    flow=op["id"] == "flow", upscale=op["id"] == "upscale")
+        options[op["id"]] = {"seconds": round(with_op - base), "extrapolated": True}
     return {
         "frames": round(frames),
         "source_frames": round(source_frames),
@@ -2195,7 +2519,10 @@ def estimate(path: str = "", mode: str = "convert", flow: bool = False,
         # which is the 9.4% the window work quoted.
         "preview_share": round(100.0 * frames / source_frames, 1) if window else None,
         "preview_window": window,
-        "resolution_bucket": bucket,
+        "resolution_bucket": _bucket(info),
+        "width": info.get("width"),
+        "height": info.get("height"),
+        "pixels_vs_1080p": round(px, 3),
         "basis": source,
         "levels": levels,
         "options": options,
@@ -2308,6 +2635,8 @@ def list_jobs():
 
         if job["status"] == "running":
             progress = _job_progress.get(job["id"])
+            if progress and progress.get("phase") == "chain":
+                progress = _chain_live_progress(job["id"], progress)
             job["progress"] = progress
             eta = _running_eta(r, progress)
             job["eta_sec"] = eta[0]
@@ -2340,7 +2669,10 @@ def queue_eta():
     counted = 0
     for r in rows:
         if r["status"] == "running":
-            seconds, estimated = _running_eta(r, _job_progress.get(r["id"]))
+            progress = _job_progress.get(r["id"])
+            if progress and progress.get("phase") == "chain":
+                progress = _chain_live_progress(r["id"], progress)
+            seconds, estimated = _running_eta(r, progress)
             if estimated:
                 exact = False
         else:

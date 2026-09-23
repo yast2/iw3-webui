@@ -557,6 +557,11 @@ function selectEntry(entry) {
 // 12-minute file, so the server recomputes every figure for the frame count of
 // the selected source and the page shows which file it is quoting.
 let quality = null;          // /api/quality
+// "≈" rather than "~": the figure rests on something not yet run end to end on
+// this machine at this size - a resolution outside 1080p-1440p for the
+// pipeline, Economical's smaller depth model, or one of the two switches.
+const EXTRAPOLATED_TIP = "Extrapolated - not measured end to end at this size or with this "
+  + "combination (pipeline runs so far: 1080p and 1440p, Standard, no switches). ";
 let currentLevel = "custom";
 let lastEstimates = null;    // {est, pre} from the last /estimate round
 
@@ -689,7 +694,7 @@ function fillDetailTime() {
   cell.textContent = mark + "full run " + fmtDuration(v.seconds)
     + (p && p.seconds !== null ? ` · preview ${fmtDuration(p.seconds)}` : "");
   cell.title = (v.extrapolated
-    ? "Extrapolated from HD measurements by this machine's own HD:4K rate ratio - no level has been measured on a 4K source. "
+    ? EXTRAPOLATED_TIP
     : "") + ((quality.levels.find(l => l.id === currentLevel) || {}).notes || "");
 }
 
@@ -715,7 +720,7 @@ async function refreshEstimates() {
       cell.textContent = (v.extrapolated ? "≈ " : "~ ") + fmtDuration(v.seconds);
       cell.className = "time";
       cell.title = (v.extrapolated
-        ? "Extrapolated from HD measurements by this machine's own HD:4K rate ratio - no level has been measured on a 4K source. "
+        ? EXTRAPOLATED_TIP
         : "") + (lv.notes || "");
     }
   }
@@ -728,7 +733,8 @@ async function refreshEstimates() {
   const w = pre.preview_window;
   document.getElementById("estimateBasis").innerHTML =
     `Times for <strong>${est.frames.toLocaleString()} frames</strong> (${esc(est.basis)}`
-    + `${est.resolution_bucket === "4k" ? ", 4K &ndash; extrapolated" : ""}). `
+    + (est.width ? `, ${est.width}×${est.height}, priced by its pixel count: `
+       + `${est.pixels_vs_1080p.toFixed(2)}× a 1080p frame` : "") + `). `
     + (w ? `A preview covers ${w.visible.toLocaleString()} visible frames plus `
          + `${w.lead} of lead and ${w.tail} of tail &mdash; `
          + `<strong>${pre.frames.toLocaleString()} of ${pre.source_frames.toLocaleString()} `
@@ -959,8 +965,20 @@ function progressCell(j) {
       ? `<div class="bar indeterminate"><span></span></div>`
       : `<div class="bar"><span style="width:${p.percent}%"></span></div>`;
     const parts = [`stage ${p.stage}/${p.stages}`, esc(p.stage_label)];
-    if (p.percent !== null) parts.push(`${p.percent}% of the stage`);
+    if (p.stage_sub) parts.push(esc(p.stage_sub));
+    if (p.percent !== null && p.percent !== undefined) {
+      parts.push(`${p.percent}% of the stage`);
+      if (p.total_frames) parts.push(`${p.frames.toLocaleString()}/${p.total_frames.toLocaleString()}`);
+    }
     if (p.rate_fps) parts.push(`${p.rate_fps} fps`);
+    // Whether the stage's remaining time is read from its own progress bar or
+    // is the model: this stage (the encode and its frame count, for one)
+    // may simply have nothing to report.
+    if (p.stage_eta_sec !== null && p.stage_eta_sec !== undefined) {
+      parts.push(`stage ${fmtDuration(p.stage_eta_sec)} left`);
+    } else if (p.stage_elapsed_sec !== null && p.stage_elapsed_sec !== undefined) {
+      parts.push(`stage running ${fmtDuration(p.stage_elapsed_sec)}, no progress output &ndash; time from the model`);
+    }
     return `${bar}<div class="progress-meta">${parts.join(" · ")}</div>`;
   }
   // The scene-detection pre-pass draws its own bar. Show it, but never let it
