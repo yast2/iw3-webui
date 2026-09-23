@@ -18,6 +18,7 @@ import signal
 import sqlite3
 import statistics
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -2388,6 +2389,8 @@ async def _startup():
         print(f"[iw3-webui] device: --gpu {IW3_GPU} (set explicitly via IW3_GPU)", flush=True)
     asyncio.create_task(_worker_loop())
     asyncio.create_task(_compare_loop())
+    # Built at start so the first search does not wait for it.
+    _ensure_search_index()
 
 
 class JobCreate(BaseModel):
@@ -2607,6 +2610,173 @@ def browse(path: str = ""):
             "type": "dir" if entry.is_dir() else "file",
         })
     return {"path": str(target.relative_to(INPUT_ROOT)) if target != INPUT_ROOT else "", "entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# Searching the picker
+#
+# /input is a FUSE union over the array, a few hundred thousand directory
+# entries deep, and a plain walk of it runs well past ten minutes - most of it
+# spent listing frame dumps (the pipeline's scratch, the research runs), each
+# 15-30k images. So the search runs against an in-memory index that a
+# background thread builds, never on the event loop and never per keystroke:
+#
+#   * directories the pipeline owns (_chain) and hidden/system ones are pruned;
+#   * a directory whose first SEARCH_BAIL_AFTER entries are all images and
+#     nothing else is abandoned mid-listing - it is a frame dump, and reading
+#     the other 29,700 names would only confirm it;
+#   * a directory holding `*.ok` stage markers is a pipeline work area (the
+#     pipeline's own convention): its videos are indexed, its subdirectories -
+#     frame and depth-map stores - are not entered. On a cold cache these are
+#     what turned a walk of minutes into one of tens of minutes;
+#   * only folders and video files are kept, because nothing else can be
+#     selected for conversion anyway.
+#
+# The index is rebuilt when it is older than SEARCH_TTL_SEC and a search
+# arrives, or on request. While a rebuild runs, searches keep answering from
+# the previous index; during the very first build they answer from what has
+# been read so far and say so.
+# ---------------------------------------------------------------------------
+SEARCH_VIDEO_EXT = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm", ".m4v", ".flv",
+                    ".ts", ".m2ts", ".mts", ".mpg", ".mpeg", ".3gp", ".ogv", ".vob",
+                    ".divx", ".asf", ".rmvb", ".f4v"}
+SEARCH_FRAME_EXT = {".jpg", ".jpeg", ".png", ".webp", ".exr", ".tif", ".tiff", ".npy",
+                    ".npz", ".bmp", ".pgm", ".ppm"}
+SEARCH_SKIP_DIRS = {"_chain", "$RECYCLE.BIN", "@eaDir", "node_modules", "__pycache__"}
+SEARCH_BAIL_AFTER = 300
+SEARCH_TTL_SEC = float(os.environ.get("SEARCH_TTL_SEC", "1800"))
+SEARCH_LIMIT = 200
+
+_search = {"entries": None, "building": None, "built_at": None, "build_sec": None,
+           "dirs": 0, "bailed": 0, "work_areas": 0, "started": None, "error": None}
+_search_lock = threading.Lock()
+
+
+def _build_search_index():
+    started = time.monotonic()
+    building: list = []
+    with _search_lock:
+        _search.update(building=building, started=time.time(), error=None)
+    dirs = bailed = work_areas = 0
+    stack = [INPUT_ROOT]
+    try:
+        while stack:
+            d = stack.pop()
+            n = frames = 0
+            videos_or_dirs = work_area = False
+            sub, local = [], []
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        n += 1
+                        try:
+                            is_dir = e.is_dir(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if is_dir:
+                            videos_or_dirs = True
+                            if e.name in SEARCH_SKIP_DIRS or e.name.startswith("."):
+                                continue
+                            sub.append(Path(e.path))
+                            local.append((e.name.lower(), e.name, e.path, "dir"))
+                        else:
+                            ext = os.path.splitext(e.name)[1].lower()
+                            if ext in SEARCH_VIDEO_EXT:
+                                videos_or_dirs = True
+                                local.append((e.name.lower(), e.name, e.path, "file"))
+                            elif ext in SEARCH_FRAME_EXT:
+                                frames += 1
+                            elif ext == ".ok":
+                                work_area = True
+                        if (n == SEARCH_BAIL_AFTER and not videos_or_dirs
+                                and frames >= 0.95 * n):
+                            bailed += 1
+                            break
+            except OSError:
+                continue
+            dirs += 1
+            root = str(INPUT_ROOT) + "/"
+            building.extend((low, name, p[len(root):], kind) for low, name, p, kind in local)
+            if work_area:
+                work_areas += 1
+            else:
+                stack.extend(sub)
+    except Exception as e:  # never let the thread die silently
+        with _search_lock:
+            _search.update(building=None, error=str(e))
+        print(f"[iw3-webui] search index failed: {e}", flush=True)
+        return
+    building.sort(key=lambda t: t[2].lower())
+    took = time.monotonic() - started
+    with _search_lock:
+        _search.update(entries=building, building=None, built_at=time.time(),
+                       build_sec=round(took, 1), dirs=dirs, bailed=bailed,
+                       work_areas=work_areas)
+    print(f"[iw3-webui] search index: {len(building)} entries from {dirs} folders "
+          f"in {took:.1f}s ({bailed} image-only folders skipped, {work_areas} "
+          f"pipeline work areas not entered)", flush=True)
+
+
+def _ensure_search_index(force=False):
+    """Start a (re)build in the background if one is due. Never blocks."""
+    with _search_lock:
+        if _search["building"] is not None:
+            return False
+        fresh = (_search["built_at"] is not None
+                 and time.time() - _search["built_at"] < SEARCH_TTL_SEC)
+        if fresh and not force:
+            return False
+        _search["building"] = []   # claimed; the thread replaces it
+    threading.Thread(target=_build_search_index, name="search-index", daemon=True).start()
+    return True
+
+
+def _search_status():
+    with _search_lock:
+        s = dict(_search)
+    return {
+        "entries": len(s["entries"]) if s["entries"] is not None else None,
+        "built_at": datetime.fromtimestamp(s["built_at"], timezone.utc).isoformat()
+                    if s["built_at"] else None,
+        "build_sec": s["build_sec"],
+        "folders_read": s["dirs"],
+        "image_folders_skipped": s["bailed"],
+        "work_areas_not_entered": s["work_areas"],
+        "building": s["building"] is not None,
+        "building_entries": len(s["building"]) if s["building"] is not None else None,
+        "error": s["error"],
+        "ttl_sec": SEARCH_TTL_SEC,
+    }
+
+
+@app.get("/api/search")
+def search(q: str = "", limit: int = SEARCH_LIMIT):
+    """File and folder names under /input; every word has to occur in the name."""
+    _ensure_search_index()
+    words = [w for w in q.lower().split() if w]
+    with _search_lock:
+        entries = _search["entries"]
+        partial = entries is None
+        if partial:
+            entries = list(_search["building"] or [])
+    limit = max(1, min(int(limit), 1000))
+    results, total = [], 0
+    if words:
+        for low, name, rel, kind in entries:
+            if all(w in low for w in words):
+                total += 1
+                if len(results) < limit:
+                    folder = rel[:-len(name)].rstrip("/")
+                    results.append({"name": name, "path": rel, "folder": folder, "type": kind})
+    return {"query": q, "results": results, "total": total,
+            "capped": total > len(results), "partial": partial,
+            "index": _search_status()}
+
+
+@app.post("/api/search/refresh")
+def search_refresh():
+    started = _ensure_search_index(force=True)
+    return {"started": started, "index": _search_status()}
 
 
 @app.get("/api/jobs")
