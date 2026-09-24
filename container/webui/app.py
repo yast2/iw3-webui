@@ -754,6 +754,19 @@ def _init_db():
                 compare_id TEXT
             )
         """)
+        # Each parked video's own settings - the level and the two switches it
+        # will be queued, previewed and compared with - live here, not in the
+        # browser, so they survive a reload and read the same on every device.
+        # Defaults, so that rows parked by older code (which names none of
+        # these columns) come out as Standard without switches.
+        wcols = {r["name"] for r in conn.execute("PRAGMA table_info(waiting)")}
+        for name, decl in (("quality", f"TEXT NOT NULL DEFAULT '{DEFAULT_QUALITY}'"),
+                           ("opt_flow", "INTEGER NOT NULL DEFAULT 0"),
+                           ("opt_upscale", "INTEGER NOT NULL DEFAULT 0"),
+                           # The single preview last asked for from this row.
+                           ("preview_id", "TEXT")):
+            if name not in wcols:
+                conn.execute(f"ALTER TABLE waiting ADD COLUMN {name} {decl}")
 
 
 _init_db()
@@ -3722,9 +3735,10 @@ def create_file_compare(body: CompareFileCreate):
 # The waiting line
 #
 # Videos parked for later: picked in Cove (or here) today, given a level and
-# queued another day - or compared Fast against Standard first, to decide the
-# level by looking. Parked videos never start by themselves; only "queue"
-# turns one into a job, at the level chosen for it. The levels and their
+# queued another day - or previewed, or compared first (see
+# _waiting_compare_plan), to decide the settings by looking. Each row stores
+# its own level and switches. Parked videos never start by themselves; only
+# "queue" turns one into a conversion, at the settings chosen for it. The levels and their
 # recipes are this app's alone: a client sends a file and, at most, a level
 # name, never parameters.
 #
@@ -3800,6 +3814,90 @@ def _waiting_estimates(input_path, info):
     return out
 
 
+def _waiting_spec(row):
+    """A parked row's settings, as its queue, preview and compare will use them.
+    A single-pass level has no switches to turn on, whatever the row says."""
+    quality = row["quality"] if row["quality"] in WAITING_LEVELS else DEFAULT_QUALITY
+    chain = bool(QUALITY_BY_ID[quality]["chain"])
+    return {"quality": quality,
+            "flow": chain and bool(row["opt_flow"]),
+            "upscale": chain and bool(row["opt_upscale"])}
+
+
+def _waiting_compare_plan(spec):
+    """What Compare makes for a row. With a switch on, the switch is the
+    question: the same level without it (A) against the row as set (B).
+    Without one, the level against Fast - and Fast itself against Standard,
+    since there is nothing cheaper to hold it against."""
+    if spec["flow"] or spec["upscale"]:
+        a = {"quality": spec["quality"], "flow": False, "upscale": False}
+        b = dict(spec)
+    elif spec["quality"] != "fast":
+        a, b = {"quality": "fast", "flow": False, "upscale": False}, dict(spec)
+    else:
+        a = dict(spec)
+        b = {"quality": "standard", "flow": False, "upscale": False}
+    return {"a": a, "b": b,
+            "label_a": _spec_label(a, "A").split(" - ", 1)[1],
+            "label_b": _spec_label(b, "B").split(" - ", 1)[1]}
+
+
+class WaitingSettingsChange(BaseModel):
+    quality: str | None = None
+    flow: bool | None = None
+    upscale: bool | None = None
+
+
+class WaitingSettings(WaitingSettingsChange):
+    id: str
+
+
+def _save_waiting_settings(conn, item):
+    """Store one row's settings; returns them normalised, or raises. Fields
+    left out keep their stored value. Caller commits."""
+    row = conn.execute("SELECT * FROM waiting WHERE id=?", (item.id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "not in the waiting line")
+    quality = row["quality"] if item.quality is None else item.quality
+    if quality not in WAITING_LEVELS:
+        raise HTTPException(400, f"'{quality}' is not a level with a recipe; "
+                                 f"pick one of {', '.join(WAITING_LEVELS)}")
+    spec = _waiting_spec({
+        "quality": quality,
+        "opt_flow": row["opt_flow"] if item.flow is None else item.flow,
+        "opt_upscale": row["opt_upscale"] if item.upscale is None else item.upscale})
+    conn.execute("UPDATE waiting SET quality=?, opt_flow=?, opt_upscale=? WHERE id=?",
+                 (spec["quality"], int(spec["flow"]), int(spec["upscale"]), item.id))
+    return spec
+
+
+@app.patch("/api/waiting/{wid}")
+def set_waiting_settings(wid: str, body: WaitingSettingsChange):
+    """Change one parked video's level or switches. Saved at once - the page
+    has no Save button; every change it shows is a change it has sent."""
+    with _db() as conn:
+        spec = _save_waiting_settings(conn, WaitingSettings(id=wid, **body.model_dump()))
+        conn.commit()
+    return {"id": wid, "settings": spec, "compare_plan": _waiting_compare_plan(spec)}
+
+
+def _save_sent_settings(items):
+    """Settings that came with a compare or preview request, stored before the
+    request acts on them - so a switch flipped a moment before the button
+    cannot be lost to a save still on its way. Returns {id: error}."""
+    errors = {}
+    if not items:
+        return errors
+    with _db() as conn:
+        for item in items:
+            try:
+                _save_waiting_settings(conn, item)
+            except HTTPException as e:
+                errors[item.id] = e.detail
+        conn.commit()
+    return errors
+
+
 class WaitingItem(BaseModel):
     input_path: str          # relative to /input, as everywhere else
     title: str | None = None
@@ -3865,10 +3963,11 @@ def list_waiting():
                               "WHERE status IN ('queued','running') AND mode<>'compare'"):
             active.setdefault(r["input_path"], []).append(
                 {"id": r["id"], "mode": r["mode"], "quality": r["quality"], "status": r["status"]})
-        compare_ids = [r["compare_id"] for r in rows if r["compare_id"]]
-        compares = {r["id"]: r for r in conn.execute(
-            f"SELECT id, status, error, output_path FROM jobs WHERE id IN "
-            f"({','.join('?' * len(compare_ids))})", compare_ids)} if compare_ids else {}
+        linked = [r[k] for r in rows for k in ("compare_id", "preview_id") if r[k]]
+        jobs = {r["id"]: r for r in conn.execute(
+            f"SELECT id, status, error, output_path, quality, opt_flow, opt_upscale, "
+            f"params_json FROM jobs WHERE id IN ({','.join('?' * len(linked))})",
+            linked)} if linked else {}
     items, unread = [], []
     for r in rows:
         try:
@@ -3880,7 +3979,16 @@ def list_waiting():
         if exists and not known:
             unread.append(path)
         usable = bool(info and info.get("duration_sec") and info.get("fps"))
-        cmp = compares.get(r["compare_id"]) if r["compare_id"] else None
+        cmp = jobs.get(r["compare_id"]) if r["compare_id"] else None
+        pre = jobs.get(r["preview_id"]) if r["preview_id"] else None
+        spec = _waiting_spec(r)
+        cmp_labels = {}
+        if cmp is not None:
+            try:
+                p = json.loads(cmp["params_json"] or "{}")
+                cmp_labels = {k: p[k].split(" - ", 1)[-1] for k in ("label_a", "label_b") if p.get(k)}
+            except (ValueError, AttributeError):
+                pass
         items.append({
             "id": r["id"],
             "input_path": r["input_path"],
@@ -3898,8 +4006,16 @@ def list_waiting():
             "estimates": _waiting_estimates(r["input_path"], info) if usable else None,
             "in_queue": active.get(r["input_path"], []),
             "compare": ({"id": cmp["id"], "status": cmp["status"], "error": cmp["error"],
-                         "file": Path(cmp["output_path"]).name if cmp["output_path"] else None}
+                         "file": Path(cmp["output_path"]).name if cmp["output_path"] else None,
+                         **cmp_labels}
                         if cmp is not None else None),
+            "settings": spec,
+            "compare_plan": _waiting_compare_plan(spec),
+            "preview": ({"id": pre["id"], "status": pre["status"], "error": pre["error"],
+                         "file": Path(pre["output_path"]).name if pre["output_path"] else None,
+                         "label": _spec_label({"quality": pre["quality"], "flow": pre["opt_flow"],
+                                               "upscale": pre["opt_upscale"]}, "P").split(" - ", 1)[1]}
+                        if pre is not None else None),
         })
     _warm_probes(unread)
     return {"items": items, "levels": WAITING_LEVELS, "default": DEFAULT_QUALITY}
@@ -3907,9 +4023,10 @@ def list_waiting():
 
 class WaitingQueueItem(BaseModel):
     id: str
-    quality: str = DEFAULT_QUALITY
-    flow: bool = False
-    upscale: bool = False
+    # Left out: the row's own stored settings.
+    quality: str | None = None
+    flow: bool | None = None
+    upscale: bool | None = None
     stereo_format: str = "full_sbs"
 
 
@@ -3928,13 +4045,16 @@ def queue_waiting(body: WaitingQueue):
             if row is None:
                 results.append({"id": item.id, "status": "rejected", "error": "not in the waiting line"})
                 continue
-            if item.quality not in WAITING_LEVELS:
+            stored = _waiting_spec(row)
+            quality = stored["quality"] if item.quality is None else item.quality
+            if quality not in WAITING_LEVELS:
                 results.append({"id": item.id, "status": "rejected",
-                                "error": f"'{item.quality}' is not a level with a recipe; "
+                                "error": f"'{quality}' is not a level with a recipe; "
                                          f"pick one of {', '.join(WAITING_LEVELS)}"})
                 continue
-            job = JobCreate(mode="convert", input_path=row["input_path"], quality=item.quality,
-                            flow=item.flow, upscale=item.upscale,
+            job = JobCreate(mode="convert", input_path=row["input_path"], quality=quality,
+                            flow=stored["flow"] if item.flow is None else item.flow,
+                            upscale=stored["upscale"] if item.upscale is None else item.upscale,
                             stereo_format=item.stereo_format)
             try:
                 params = _checked_job(job)
@@ -3946,7 +4066,7 @@ def queue_waiting(body: WaitingQueue):
             conn.execute("DELETE FROM waiting WHERE id=?", (item.id,))
             conn.commit()
             results.append({"id": item.id, "status": "queued", "job_id": job_id,
-                            "quality": item.quality})
+                            "quality": quality})
     return {"results": results,
             "queued": sum(1 for r in results if r["status"] == "queued"),
             "rejected": sum(1 for r in results if r["status"] == "rejected")}
@@ -3954,19 +4074,29 @@ def queue_waiting(body: WaitingQueue):
 
 class WaitingCompare(BaseModel):
     ids: list[str]
-    level_a: str = "fast"
-    level_b: str = "standard"
+    # Settings the page holds for these rows, stored before anything is made.
+    items: list[WaitingSettings] = []
+    # Both left out (the page never sends them): each row's own plan, see
+    # _waiting_compare_plan. Either one given: that pair of plain levels for
+    # every row, as before - the other one defaults as it always did.
+    level_a: str | None = None
+    level_b: str | None = None
     layout: str = "aba"
     stereo_format: str = "full_sbs"
 
 
 @app.post("/api/waiting/compare")
 def compare_waiting(body: WaitingCompare):
-    """Fast against Standard (by default) for each parked video: both previews
-    on one window and the comparison, as the compare button does. The video
-    stays parked - the comparison is how its level gets decided."""
+    """Two previews of the same window and their comparison, for each parked
+    video, following the row's settings (or the levels asked for). The video
+    stays parked - the comparison is how its settings get decided."""
+    save_errors = _save_sent_settings(body.items)
+    explicit = body.level_a is not None or body.level_b is not None
     results = []
     for wid in body.ids:
+        if wid in save_errors:
+            results.append({"id": wid, "status": "rejected", "error": save_errors[wid]})
+            continue
         with _db() as conn:
             row = conn.execute("SELECT * FROM waiting WHERE id=?", (wid,)).fetchone()
             busy = None
@@ -3979,19 +4109,82 @@ def compare_waiting(body: WaitingCompare):
         if busy is not None:
             results.append({"id": wid, "status": "already comparing", "compare_id": row["compare_id"]})
             continue
+        if explicit:
+            sides = dict(level_a=body.level_a or "fast", level_b=body.level_b or "standard")
+        else:
+            plan = _waiting_compare_plan(_waiting_spec(row))
+            sides = dict(level_a=plan["a"]["quality"], flow_a=plan["a"]["flow"],
+                         upscale_a=plan["a"]["upscale"],
+                         level_b=plan["b"]["quality"], flow_b=plan["b"]["flow"],
+                         upscale_b=plan["b"]["upscale"])
         try:
             made = create_file_compare(CompareFileCreate(
-                input_path=row["input_path"], level_a=body.level_a, level_b=body.level_b,
-                layout=body.layout, stereo_format=body.stereo_format))
+                input_path=row["input_path"], layout=body.layout,
+                stereo_format=body.stereo_format, **sides))
         except HTTPException as e:
             results.append({"id": wid, "status": "rejected", "error": e.detail})
             continue
         with _db() as conn:
             conn.execute("UPDATE waiting SET compare_id=? WHERE id=?", (made["id"], wid))
             conn.commit()
-        results.append({"id": wid, "status": "comparing", "compare_id": made["id"]})
+        results.append({"id": wid, "status": "comparing", "compare_id": made["id"],
+                        "label_a": made["label_a"], "label_b": made["label_b"]})
     return {"results": results,
             "comparing": sum(1 for r in results if r["status"] == "comparing"),
+            "rejected": sum(1 for r in results if r["status"] == "rejected")}
+
+
+class WaitingPreview(BaseModel):
+    ids: list[str]
+    items: list[WaitingSettings] = []
+    stereo_format: str = "full_sbs"
+
+
+@app.post("/api/waiting/preview")
+def preview_waiting(body: WaitingPreview):
+    """One one-minute preview per parked video, at the row's settings and on
+    the window the rule picks - the same job the Preview button makes. The
+    video stays parked. A preview of the same file at the same settings that
+    is still queued or running is pointed at, not queued a second time."""
+    save_errors = _save_sent_settings(body.items)
+    results = []
+    with _db() as conn:
+        for wid in body.ids:
+            if wid in save_errors:
+                results.append({"id": wid, "status": "rejected", "error": save_errors[wid]})
+                continue
+            row = conn.execute("SELECT * FROM waiting WHERE id=?", (wid,)).fetchone()
+            if row is None:
+                results.append({"id": wid, "status": "rejected", "error": "not in the waiting line"})
+                continue
+            spec = _waiting_spec(row)
+            same = conn.execute(
+                "SELECT id FROM jobs WHERE mode='preview' AND status IN ('queued','running') "
+                "AND input_path=? AND quality=? AND opt_flow=? AND opt_upscale=? "
+                "AND stereo_format=? AND preview_start_sec IS NULL "
+                "ORDER BY status='running' DESC, created_at LIMIT 1",
+                (row["input_path"], spec["quality"], int(spec["flow"]), int(spec["upscale"]),
+                 body.stereo_format)).fetchone()
+            if same is not None:
+                conn.execute("UPDATE waiting SET preview_id=? WHERE id=?", (same["id"], wid))
+                conn.commit()
+                results.append({"id": wid, "status": "already previewing", "job_id": same["id"]})
+                continue
+            job = JobCreate(mode="preview", input_path=row["input_path"], quality=spec["quality"],
+                            flow=spec["flow"], upscale=spec["upscale"],
+                            stereo_format=body.stereo_format)
+            try:
+                params = _checked_job(job)
+            except HTTPException as e:
+                results.append({"id": wid, "status": "rejected", "error": e.detail})
+                continue
+            job_id = _insert_job(conn, "preview", job.input_path, False, job.stereo_format,
+                                 params, job.quality, job.flow, job.upscale, None)
+            conn.execute("UPDATE waiting SET preview_id=? WHERE id=?", (job_id, wid))
+            conn.commit()
+            results.append({"id": wid, "status": "previewing", "job_id": job_id})
+    return {"results": results,
+            "previewing": sum(1 for r in results if r["status"] == "previewing"),
             "rejected": sum(1 for r in results if r["status"] == "rejected")}
 
 

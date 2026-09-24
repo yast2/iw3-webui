@@ -272,37 +272,64 @@ The output lands next to preview A, as
 
 Videos you have picked but do not want converted yet. A parked video never
 starts by itself: it is a row in a table of its own that nothing in the queue
-reads. Each row shows the video's length and size, a level (Standard unless
-changed, with the flow and 4K switches where the level takes them) and what
-that level costs for that file — priced by the same model the queue uses, so
-the figure is the one the queue will show. From there, for any selection:
+reads. Each row shows the video's length and size, its settings — a level
+(Standard unless changed) and the flow and 4K switches where the level takes
+them — and what those settings cost for that file, priced by the same model the
+queue uses, so the figure is the one the queue will show. The settings are
+stored with the row as you change them (there is no Save button), so they
+survive a reload and read the same on every device. From there, for any
+selection:
 
-- **Queue** — one full conversion per video, each at its own level; queued
+- **Queue** — one full conversion per video, at its row's settings; queued
   videos leave the waiting line.
-- **Compare Fast vs Standard** — both previews on one window and the
-  comparison of the two, as the compare button makes them; the video stays
-  parked until you have looked and chosen.
+- **Preview** — one one-minute preview per video at its row's settings, on the
+  window the rule picks, exactly as the Preview button makes it. The row shows
+  the preview's state and, once it is done, its file name. A preview of the
+  same file at the same settings that is still queued or running is not queued
+  a second time.
+- **Compare** — two previews of the same window and the comparison of the two.
+  What each row compares is written under its level before you click:
+  - flow or 4K on: the same level without the switches (A) against the row as
+    set (B) — e.g. *Standard vs Standard +flow*;
+  - no switches, Standard or Economical: *Fast vs* that level;
+  - Fast: *Fast vs Standard*.
 - **Remove** — out of the waiting line; nothing on disk is touched.
 
-The levels and their recipes belong to this app. A client names a file and at
-most a level, never parameters:
+Preview and Compare leave the video parked. Previews that already exist for
+the same file and settings are reused by Compare, as everywhere else.
+
+The levels and their recipes belong to this app. A client names a file, at
+most a level and the two switches, never parameters:
 
 ```sh
 # park one or many (title and an outside id are optional, shown in the list)
 curl -X POST localhost:8790/api/waiting -H 'Content-Type: application/json' \
      -d '{"items":[{"input_path":"films/Holiday.mp4","title":"Holiday"}],"source":"cove"}'
+# every row with its settings, what Compare would make, and its preview/comparison
 curl localhost:8790/api/waiting
+# change a row's settings (fields left out keep their value; Fast turns the switches off)
+curl -X PATCH localhost:8790/api/waiting/<id> -H 'Content-Type: application/json' \
+     -d '{"quality":"standard","flow":true}'
+# queue at the row's settings (or name quality/flow/upscale per item to override)
 curl -X POST localhost:8790/api/waiting/queue -H 'Content-Type: application/json' \
-     -d '{"items":[{"id":"<id>","quality":"standard"}]}'
+     -d '{"items":[{"id":"<id>"}]}'
+curl -X POST localhost:8790/api/waiting/preview -H 'Content-Type: application/json' \
+     -d '{"ids":["<id>"]}'
+# compare as the row's settings say; level_a/level_b force a plain pair instead
 curl -X POST localhost:8790/api/waiting/compare -H 'Content-Type: application/json' \
      -d '{"ids":["<id>"],"layout":"stacked"}'
 curl -X POST localhost:8790/api/waiting/remove -H 'Content-Type: application/json' \
      -d '{"ids":["<id>"]}'
 ```
 
+`preview` and `compare` also take `"items":[{"id":…,"quality":…,"flow":…,"upscale":…}]`:
+settings stored before the request acts, which is how the page makes sure a
+switch flipped a moment before the button is the one used.
+
 Parking a file that is already parked keeps the one row. Every call answers per
-item (`added`, `already waiting`, `queued`, `comparing`, `rejected` with the
-reason), so one bad path does not sink a batch.
+item (`added`, `already waiting`, `queued`, `previewing`, `already previewing`,
+`comparing`, `already comparing`, `rejected` with the reason), so one bad path
+does not sink a batch.
 
 ## Quality levels
 

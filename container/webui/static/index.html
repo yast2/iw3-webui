@@ -323,6 +323,7 @@
     border:1px solid var(--line);color:var(--faint);white-space:nowrap}
   .badge.hot{color:var(--accent);border-color:rgba(255,153,0,.4)}
   .badge.bad{color:var(--bad);border-color:rgba(224,87,78,.4)}
+  .wplan{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-top:4px;white-space:nowrap}
   .wbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px}
   .wbar .count{font-family:var(--mono);font-size:12px;color:var(--muted);margin-right:auto}
 
@@ -351,6 +352,8 @@
     tr.logrow td{display:block;padding:0 0 12px}
     tr.logrow td::before{display:none}
     .wtable td.vid{max-width:none}
+    .wtable .wlv{min-width:0;flex:1}
+    .wtable .badge,.wplan{white-space:normal}
     .phead .hint{display:none}   /* dragging is a mouse gesture; the buttons stay */
   }
 </style>
@@ -518,12 +521,16 @@
         <div class="wbar">
           <span class="count" id="waitCount">nothing selected</span>
           <button class="btn sm" id="waitQueue" disabled>Queue</button>
-          <button class="btn ghost sm" id="waitCompare" disabled>Compare Fast vs Standard</button>
+          <button class="btn ghost sm" id="waitPreview" disabled title="One one-minute preview per selected video, at its row's settings">Preview</button>
+          <button class="btn ghost sm" id="waitCompare" disabled title="Two previews of the same minute side by side, as shown under each row's level">Compare</button>
           <button class="btn danger sm" id="waitRemove" disabled>Remove</button>
         </div>
-        <div class="note">Each video is queued as a full conversion at the level picked in its row.
-          <strong>Compare</strong> queues a Fast and a Standard preview of the same minute and puts them
-          side by side (arrangement as in the compare panel); the video stays parked until you queue it.</div>
+        <div class="note">Each row keeps its level and switches (saved as you change them).
+          <strong>Queue</strong> makes a full conversion at those settings. <strong>Preview</strong> makes one
+          one-minute preview at them. <strong>Compare</strong> makes two previews of the same minute and puts
+          them side by side (arrangement as in the compare panel) — what each row compares is written under its
+          level: with +flow or +4K on, the same level without them against the row as set; otherwise Fast
+          against the row's level (Fast itself against Standard). Preview and Compare leave the video parked.</div>
       </div>
     </section>
 
@@ -1772,18 +1779,53 @@ function toggleLog(jobId) {
 // Parked videos, each with its own level (Standard unless changed) and that
 // level's price for that file. The server sends every level's price, with and
 // without the switches, so changing a row's level never waits on a request.
+// The settings themselves are the server's: a change is shown at once and
+// sent at once, and the list only takes the server's word again for a row
+// once nothing is on its way for it.
 // The table is only rebuilt when the list itself changes: rebuilding it under
 // an open dropdown would snap the dropdown shut.
 let waiting = [];
 let waitLevels = [];
 let waitDefault = "standard";
 let waitSig = "";
-const waitChoice = {};            // id -> {quality, flow, upscale}
+const waitChoice = {};            // id -> {quality, flow, upscale}, as last sent or read
+const waitSaving = {};            // id -> promise of the saves still on their way
 const waitChecked = new Set();
 
 function waitSpec(it) {
-  if (!waitChoice[it.id]) waitChoice[it.id] = { quality: waitDefault, flow: false, upscale: false };
+  if (!waitChoice[it.id]) waitChoice[it.id] = it.settings
+    ? { ...it.settings } : { quality: waitDefault, flow: false, upscale: false };
   return waitChoice[it.id];
+}
+
+// Chained per row, and each save sends the row as it is when its turn comes:
+// three quick clicks cannot land out of order and leave an older setting.
+function saveWaitSpec(id) {
+  const run = (waitSaving[id] || Promise.resolve()).then(async () => {
+    try {
+      await api(`/waiting/${encodeURIComponent(id)}`, { method: "PATCH",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(waitChoice[id]) });
+    } catch (e) {
+      if (waiting.some(w => w.id === id)) alert("Could not save that row's setting:\n\n" + e.message);
+      waitSig = "";               // show the server's setting again, not the refused one
+    }
+  });
+  waitSaving[id] = run;
+  run.then(() => { if (waitSaving[id] === run) { delete waitSaving[id]; refreshWaiting(); } });
+}
+
+// What Compare makes for a row - the same rule as the server's
+// _waiting_compare_plan, so the row can say it before anyone clicks.
+function waitPlan(sp) {
+  const plain = q => ({ quality: q, flow: false, upscale: false });
+  if (sp.flow || sp.upscale) return [plain(sp.quality), sp];
+  if (sp.quality !== "fast") return [plain("fast"), sp];
+  return [sp, plain("standard")];
+}
+
+function specLabel(sp) {
+  const lv = quality?.levels.find(l => l.id === sp.quality);
+  return [lv ? lv.label : sp.quality, sp.flow ? "+flow" : "", sp.upscale ? "+4K" : ""].filter(Boolean).join(" ");
 }
 
 function waitPrice(it) {
@@ -1808,17 +1850,26 @@ function waitBadges(it) {
   const b = [];
   if (!it.exists) b.push(`<span class="badge bad">file is gone</span>`);
   for (const q of it.in_queue) {
+    if (it.preview && q.id === it.preview.id) continue;   // shown as the row's preview below
     const lv = quality?.levels.find(l => l.id === q.quality);
     const words = [q.status === "running" ? "running" : "queued", q.mode === "preview" ? "preview" : "",
                    lv ? lv.label : q.quality].filter(Boolean).join(" ");
     b.push(`<span class="badge hot" title="There is already a job for this file">${esc(words)}</span>`);
+  }
+  if (it.preview) {
+    const p = it.preview;
+    const word = { queued: "preview queued", running: "previewing…", done: "preview ready",
+                   failed: "preview failed", canceled: "preview canceled" }[p.status] || "preview " + p.status;
+    b.push(`<span class="badge ${p.status === "done" ? "hot" : p.status === "failed" ? "bad" : ""}"`
+      + ` title="${esc(p.error || p.label)}">${esc(word + " · " + p.label)}</span>`);
   }
   if (it.compare) {
     const c = it.compare;
     const word = { queued: "comparing…", running: "comparing…", done: "comparison ready",
                    failed: "comparison failed", canceled: "comparison canceled" }[c.status] || c.status;
     b.push(`<span class="badge ${c.status === "done" ? "hot" : c.status === "failed" ? "bad" : ""}"`
-      + ` title="${esc(c.file ? "Previews/…/" + c.file : c.error || "")}">${esc(word)}</span>`);
+      + ` title="${esc([c.label_a && c.label_a + " vs " + c.label_b, c.file ? "Previews/…/" + c.file : c.error]
+                       .filter(Boolean).join(" · "))}">${esc(word)}</span>`);
   }
   if (it.source === "cove") b.push(`<span class="badge" title="Parked from Cove${it.cove_video_id ? ", video " + esc(it.cove_video_id) : ""}">from Cove</span>`);
   return b.length ? `<div class="badges">${b.join("")}</div>` : "";
@@ -1849,10 +1900,12 @@ function renderWaiting() {
       <td class="vid" data-label="Video" title="/input/${esc(it.input_path)}"><div class="wv">
         <div class="wt">${esc(it.title || it.name)}</div>
         ${it.title ? `<div class="wf">${esc(it.name)}</div>` : ""}
-        ${waitBadges(it)}</div></td>
+        ${waitBadges(it)}
+        ${it.preview && it.preview.file ? `<div class="wf wpf" title="Previews/…/${esc(it.preview.file)}">preview: ${esc(it.preview.file)}</div>` : ""}</div></td>
       <td class="num" data-label="Length">${len}</td>
       <td class="num" data-label="Resolution">${res}</td>
-      <td data-label="Level"><div class="wlevel"><select>${options}</select>${chip("flow", "flow")}${chip("upscale", "4K")}</div></td>
+      <td data-label="Level"><div class="wlv"><div class="wlevel"><select>${options}</select>${chip("flow", "flow")}${chip("upscale", "4K")}</div>
+        <div class="wplan" title="What Compare makes for this row">compare: ${esc(waitPlan(sp).map(specLabel).join(" vs "))}</div></div></td>
       <td class="num eta" data-label="Estimate" title="${esc(waitPrice(it)?.extrapolated ? EXTRAPOLATED_TIP : "Priced like a queued job: this file's frames and pixel count at this level")}">${
         it.exists ? (it.estimates ? priceText(waitPrice(it)) : (it.probed ? "—" : "reading…")) : "—"}</td>`;
     tr.querySelector(".wsel").onchange = (e) => {
@@ -1863,9 +1916,10 @@ function renderWaiting() {
       sp.quality = e.target.value;
       if (!levelChain(sp.quality)) { sp.flow = false; sp.upscale = false; }
       renderWaiting();
+      saveWaitSpec(it.id);
     };
     for (const box of tr.querySelectorAll(".chip input")) {
-      box.onchange = () => { sp[box.dataset.k] = box.checked; renderWaiting(); };
+      box.onchange = () => { sp[box.dataset.k] = box.checked; renderWaiting(); saveWaitSpec(it.id); };
     }
     tbody.appendChild(tr);
   }
@@ -1887,7 +1941,7 @@ function updateWaitBar() {
     ? `${picked.length} selected` + (known ? ` · ${approx ? "≈" : "~"}${fmtDuration(total)} at the chosen levels` : "")
       + (known < picked.length ? ` (${picked.length - known} not priced yet)` : "")
     : "nothing selected";
-  for (const id of ["waitQueue", "waitCompare", "waitRemove"]) {
+  for (const id of ["waitQueue", "waitPreview", "waitCompare", "waitRemove"]) {
     document.getElementById(id).disabled = !picked.length;
   }
   document.getElementById("waitSummary").textContent =
@@ -1899,8 +1953,15 @@ async function refreshWaiting(force) {
   try { data = await api("/waiting"); } catch (e) { return; }
   waitLevels = data.levels;
   waitDefault = data.default;
+  // A row with a save on its way keeps what the page shows; the others take
+  // the server's settings, which may have been changed on another device.
+  // In place: the row's handlers hold this object.
+  for (const it of data.items) {
+    if (!waitSaving[it.id]) Object.assign(waitChoice[it.id] || (waitChoice[it.id] = {}), it.settings);
+  }
   const sig = JSON.stringify(data.items.map(it => [it.id, it.probed, it.exists, it.title,
-    it.compare && it.compare.status, it.in_queue.map(q => q.id + q.status)]));
+    it.compare && it.compare.status, it.in_queue.map(q => q.id + q.status),
+    waitChoice[it.id], it.preview && [it.preview.id, it.preview.status, it.preview.file]]));
   waiting = data.items;
   if (force || sig !== waitSig) { waitSig = sig; renderWaiting(); }
   // Files still being read: ask again soon rather than at the next 10 s tick.
@@ -1935,16 +1996,36 @@ document.getElementById("waitQueue").onclick = async () => {
   if (r.queued) { setStep(4, [1, 2, 3]); refreshJobs(); }
 };
 
+// The rows' settings go along with the request and are stored before it acts,
+// so a switch flipped just before the button cannot be lost to a slow save.
+function pickedWithSettings() {
+  const picked = waiting.filter(it => waitChecked.has(it.id));
+  return { ids: picked.map(it => it.id), items: picked.map(it => ({ id: it.id, ...waitSpec(it) })), picked };
+}
+
+document.getElementById("waitPreview").onclick = async () => {
+  const { ids, items } = pickedWithSettings();
+  let r;
+  try {
+    r = await api("/waiting/preview", { method: "POST", headers: { "Content-Type": "application/json" },
+                                        body: JSON.stringify({ ids, items }) });
+  } catch (e) { alert("Could not queue the previews:\n\n" + e.message); return; }
+  reportRejected(r.results, "previewed");
+  await refreshWaiting(true);
+  refreshJobs();
+};
+
 document.getElementById("waitCompare").onclick = async () => {
-  const ids = waiting.filter(it => waitChecked.has(it.id)).map(it => it.id);
+  const { ids, items, picked } = pickedWithSettings();
   const layout = document.getElementById("cmpLayout").value || "aba";
-  if (!confirm(`Queue a Fast and a Standard preview of the same minute for ${ids.length} `
-               + `video${ids.length === 1 ? "" : "s"}, and a comparison of each `
-               + `(${layout === "stacked" ? "A above B" : "A / B / A"})?`)) return;
+  const plans = [...new Set(picked.map(it => waitPlan(waitSpec(it)).map(specLabel).join(" vs ")))];
+  if (!confirm(`Queue two previews of the same minute and a comparison for ${ids.length} `
+               + `video${ids.length === 1 ? "" : "s"} (${layout === "stacked" ? "A above B" : "A / B / A"}):\n\n`
+               + plans.map(p => "• " + p).join("\n"))) return;
   let r;
   try {
     r = await api("/waiting/compare", { method: "POST", headers: { "Content-Type": "application/json" },
-                                        body: JSON.stringify({ ids, layout }) });
+                                        body: JSON.stringify({ ids, items, layout }) });
   } catch (e) { alert("Could not queue the comparisons:\n\n" + e.message); return; }
   reportRejected(r.results, "compared");
   await refreshWaiting(true);
