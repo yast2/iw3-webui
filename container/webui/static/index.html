@@ -70,7 +70,7 @@
 
   /* ---- layout: step rail + work column ---- */
   .wrap{display:grid;grid-template-columns:210px minmax(0,1fr);gap:0;
-    max-width:1240px;margin:0 auto;padding:30px 26px 80px}
+    max-width:1500px;margin:0 auto;padding:30px 26px 80px}
   .rail{position:sticky;top:90px;align-self:start;height:max-content;padding-top:6px}
   .rail ol{list-style:none;margin:0;padding:0;position:relative}
   .rail ol::before{content:"";position:absolute;left:13px;top:14px;bottom:14px;width:2px;
@@ -261,6 +261,16 @@
   .job-actions{white-space:nowrap}
   .job-actions .btn{min-height:28px}
   .job-actions .btn + .btn{margin-left:6px}
+  /* 24.09.2026: with ~100 rows the queue had outgrown its panel (1141 px of table
+     in 940), so the buttons column began at the panel's right edge and was only
+     reachable through the horizontal scrollbar under the last row. The page is
+     wider now (max-width 1500 instead of 1240), and on narrower windows the
+     buttons stay pinned to the right edge - what they cover is still there by
+     scrolling sideways. The inset shadow redraws the row line the sticky cell
+     would otherwise paint over. */
+  #p4 thead th:last-child,td.job-actions{position:sticky;right:0;z-index:1;
+    background:var(--panel)}
+  td.job-actions{box-shadow:-12px 0 12px -10px rgba(0,0,0,.9),inset 0 -1px 0 #1f1f1f}
   /* Queue order is edited in place, so the rows have to look draggable before
      anyone tries it: a grip, a grab cursor, and a gap where the row will land. */
   tr.queued-row{cursor:grab}
@@ -347,6 +357,7 @@
     td:empty{display:none}
     td.path{max-width:none;white-space:normal;word-break:break-all}
     .job-actions{flex-wrap:wrap;white-space:normal}
+    td.job-actions{position:static;box-shadow:none;background:none}
     /* the log belongs to the card above it, not a card of its own */
     tr.logrow{border:0;background:none;padding:0;margin-top:-8px}
     tr.logrow td{display:block;padding:0 0 12px}
