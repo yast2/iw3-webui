@@ -1915,11 +1915,33 @@ def _video_name(input_path):
     return _safe_component(Path(input_path).stem)
 
 
+# Since 24.09.2026 16:41 the pipeline always runs its edge fix, and every file
+# it makes says so at the end of its recipe code: "_G2EMAKante_LRF",
+# "_G2EMAFlussKante_LRF". A finished pipeline preview without it was made
+# before that - a different, worse recipe under the same level name. It is
+# never reused as a side of a comparison, and wherever it is named it is
+# called what it is. A queued or running one runs the current script and is
+# fine. Single-pass levels (Fast) never had the fault and are not affected.
+_RECIPE_CODE = re.compile(r"_([A-Za-z0-9]+)_LRF\.mp4$")
+
+
+def _without_edge_fix(row):
+    """A finished pipeline preview made before the edge fix was compulsory."""
+    if not QUALITY_BY_ID.get(row["quality"], {}).get("chain"):
+        return False
+    if row["status"] != "done" or not row["output_path"]:
+        return False
+    m = _RECIPE_CODE.search(Path(row["output_path"]).name)
+    return not (m and m.group(1).endswith("Kante"))
+
+
 def _level_name(row):
     """'Standard', 'Fast +flow' - a job's level as a person would say it."""
     level = QUALITY_BY_ID.get(row["quality"], {})
     name = level.get("label") or row["quality"] or "custom"
     switches = (["+flow"] if row["opt_flow"] else []) + (["+4K"] if row["opt_upscale"] else [])
+    if _without_edge_fix(row):
+        switches.append("(no edge fix)")
     return name + (" " + " ".join(switches) if switches else "")
 
 
@@ -2309,6 +2331,9 @@ def _find_reusable_preview(conn, input_path, stereo_format, spec, window, info, 
         if level.get("params") and json.loads(r["params_json"]) != level["params"]:
             continue
         if r["status"] == "done" and not (r["output_path"] and Path(r["output_path"]).is_file()):
+            continue
+        # Same for a pipeline preview from before the edge fix (see _RECIPE_CODE).
+        if _without_edge_fix(r):
             continue
         if window["whole"]:
             return r
@@ -3593,6 +3618,9 @@ def comparable():
             "quality_label": level.get("label") or r["quality"],
             "flow": bool(r["opt_flow"]),
             "upscale": bool(r["opt_upscale"]),
+            # Listed still - picking one by hand is a before/after of the fix -
+            # but never mistaken for the current recipe (see _RECIPE_CODE).
+            "edge_fix": not _without_edge_fix(r),
             "preview_start_sec": r["preview_start_sec"],
             "finished_at": r["finished_at"],
             "file": Path(r["output_path"]).name,
@@ -4014,7 +4042,8 @@ def list_waiting():
             "preview": ({"id": pre["id"], "status": pre["status"], "error": pre["error"],
                          "file": Path(pre["output_path"]).name if pre["output_path"] else None,
                          "label": _spec_label({"quality": pre["quality"], "flow": pre["opt_flow"],
-                                               "upscale": pre["opt_upscale"]}, "P").split(" - ", 1)[1]}
+                                               "upscale": pre["opt_upscale"]}, "P").split(" - ", 1)[1]
+                                  + (" (no edge fix)" if _without_edge_fix(pre) else "")}
                         if pre is not None else None),
         })
     _warm_probes(unread)

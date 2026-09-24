@@ -1301,6 +1301,7 @@ function describePreview(p) {
   const bits = [p.quality_label];
   if (p.flow) bits.push("+flow");
   if (p.upscale) bits.push("+4K");
+  if (p.edge_fix === false) bits.push("(no edge fix)");
   const at = p.preview_start_sec === null ? "auto window"
            : `from ${fmtDuration(p.preview_start_sec)}`;
   return `${bits.join(" ")} · ${at} · ${p.input_path.split("/").pop()}`;

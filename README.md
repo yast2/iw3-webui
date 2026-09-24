@@ -296,7 +296,12 @@ selection:
 - **Remove** — out of the waiting line; nothing on disk is touched.
 
 Preview and Compare leave the video parked. Previews that already exist for
-the same file and settings are reused by Compare, as everywhere else.
+the same file and settings are reused by Compare, as everywhere else — except
+a finished pipeline preview whose recipe code lacks `Kante` (`_G2EMA_`,
+`_G2EMAFluss_`, …): it was made before the pipeline's edge fix became
+compulsory and is a different recipe under the same name. It is never reused,
+and where it is listed (the picker for comparing two existing previews, a
+row's preview badge) it says `(no edge fix)`. Fast is not affected.
 
 The levels and their recipes belong to this app. A client names a file, at
 most a level and the two switches, never parameters:
