@@ -18,6 +18,7 @@ ETAs, in a container you can put on whatever machine holds the GPU.
 | Directory | What it is |
 |---|---|
 | `container/` | The queue, the web UI and the Dockerfile. Stands alone; needs nothing else. |
+| `chain/` | The multi-stage pipeline behind the Economical and Standard levels: a server driver (`chain/server`) and a port of it for an NVIDIA desktop (`chain/desktop`). See [chain/README.md](chain/README.md). |
 | `cove-extension/` | Optional. An **Add to iw3 Queue** button for [Cove](https://github.com/coveapp/cove)'s video detail page, which posts to this queue over HTTP. |
 
 The extension needs the container. The container does not need the extension.
@@ -367,12 +368,13 @@ curl -s localhost:8790/api/quality
 curl -s 'localhost:8790/api/estimate?path=some/film.mkv'
 ```
 
-### The multi-stage pipeline is not in this repository
+### The multi-stage pipeline
 
-The chained levels run five or six programs per job — frame extraction, depth
+The chained levels run five to seven programs per job — frame extraction, depth
 estimation, depth post-processing, warp, encode — and that pipeline is a
 separate, machine-specific script. This app execs it with a level name and
-parses its stage markers; it does not reimplement it.
+parses its stage markers; it does not reimplement it. The scripts used here are
+in [`chain/`](chain/README.md), for an Intel Arc server and an NVIDIA desktop.
 
 Point `IW3_CHAIN_SCRIPT` at an executable that accepts
 
