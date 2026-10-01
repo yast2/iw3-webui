@@ -458,14 +458,13 @@ What is actually verified:
 | Backend | builds | converts |
 |---|---|---|
 | Intel Arc / XPU | ✅ | ✅ **measured** on an Arc Pro B60 |
-| NVIDIA / CUDA | ✅ in CI | ❓ never run — no NVIDIA hardware here |
+| NVIDIA / CUDA | ✅ in CI | ✅ **measured** on an RTX 5080, with the pipeline in `chain/desktop` (native Windows, no container); the `:cuda` image itself has not been run there |
 | CPU only | ✅ in CI | ❓ never run |
 | AMD / ROCm | ❓ not in CI | ❓ never run |
 
 Every push builds all three CI backends and runs a smoke test that imports
-torch and iw3 inside the finished image, so a broken Dockerfile is caught
-without hardware. Whether the *conversion* is correct on CUDA or ROCm is a
-question this project cannot answer on its own.
+torch and iw3 inside the finished image, so a broken Dockerfile is caught Whether the *conversion* is correct on ROCm, or inside the `:cuda`
+image rather than natively, is a question this project cannot answer on its own.
 
 I would rather say "unverified" than imply a result I have never seen. If you
 run one of these, a report — or a PR correcting this table — is the most useful
