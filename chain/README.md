@@ -12,7 +12,7 @@ There are two drivers for the same recipe, because it runs on two machines:
 | Folder | Driver | Runs on | Encoder |
 |---|---|---|---|
 | `server/` | `run_voll.sh` (POSIX sh) | Linux, inside the iw3-webui container, Intel Arc | `hevc_qsv` via jellyfin-ffmpeg |
-| `desktop/` | `run_chain.py` (Python) | Windows or Linux, NVIDIA | `hevc_nvenc` (or `hevc_qsv` / `libx265`) |
+| `desktop/` | `run_chain.py` (Python) | Windows or Linux, NVIDIA | `hevc_nvenc` on Windows, `hevc_qsv` on Linux; `--encoder` overrides (`libx265` too) |
 
 `run_voll.sh` is the reference. `run_chain.py` is a port of it with the same
 stages, calls and parameters; only the way they are started differs (argument

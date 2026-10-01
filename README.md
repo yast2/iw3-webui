@@ -159,7 +159,7 @@ Reordering from the outside:
 # run this job next
 curl -X POST localhost:8790/api/jobs/<id>/move \
      -H 'Content-Type: application/json' -d '{"to":"top"}'
-# to, bottom, up and down are all accepted
+# top, bottom, up and down are all accepted
 
 # or set the whole order at once
 curl -X POST localhost:8790/api/queue/reorder \
@@ -427,22 +427,31 @@ Everything below is an environment variable on the container.
 | `PREVIEW_TAIL_FRAMES` | `30` | Frames run after the window and then cut away |
 | `FFMPEG_BIN` | `ffmpeg` | ffmpeg used for the motion scan and clip extraction |
 | `FFPROBE_BIN` | `ffprobe` | ffprobe used to locate keyframes and check produced files |
-| `QSV_FFMPEG` | `/usr/lib/jellyfin-ffmpeg/ffmpeg` | Build used for this app's own two re-encodes |
+| `QSV_FFMPEG` | `/usr/lib/jellyfin-ffmpeg/ffmpeg` | Build used for this app's own two re-encodes (cutting the lead and tail frames off a finished preview, and comparisons). Not in the image; if it or the render node is missing, those encodes fall back to `libx265` and the startup log says so |
 | `QSV_DEVICE` | `/dev/dri/renderD128` | Render node for the hardware encoder |
 | `QSV_GLOBAL_QUALITY` | `17` | `-global_quality` for `hevc_qsv` |
 | `OUTPUT_UID` / `OUTPUT_GID` | `99` / `100` | Owner set on delivered files |
 | `NUNIF_HOME` | `/config` | Checkpoints, queue database, logs |
+| `IW3_CHAIN_SCRIPT` | `/opt/iw3-chain/run_chain.sh` | Driver for the multi-stage levels — see [The multi-stage pipeline](#the-multi-stage-pipeline). If it is not there, those levels are disabled |
+| `IW3_CHAIN_WORK` | `/output/_chain` | Scratch folder per job |
+| `IW3_PREVIEWS` | `/output/Previews` | Where finished previews and comparisons go |
+| `SCRATCH_KEEP_FAILED_HOURS` | `48` | How long a failed job's scratch is kept |
+| `SEARCH_TTL_SEC` | `1800` | Age at which the file-name search index is rebuilt |
 
-Only one job runs at a time regardless. iw3 was not built to share a device
-between concurrent conversions.
+Only one conversion runs at a time regardless. iw3 was not built to share a
+device between concurrent conversions. Comparisons are the one exception: they
+run on a worker of their own (see [Comparing two previews](#comparing-two-previews-in-one-file)).
 
 ## Other GPUs
 
-There is no vendor-specific code in this project, and none is needed: nunif
+There is no vendor-specific code in the conversion path, and none is needed: nunif
 resolves the backend itself (`cuda` → `mps` → `xpu`, see `nunif/device.py`), so
 one build differs from another only in which base image carries which torch.
 The full matrix and the build commands are in
-[`container/BUILD.md`](container/BUILD.md).
+[`container/BUILD.md`](container/BUILD.md). Two things outside that path are
+Intel-specific: this app's own re-encodes prefer `hevc_qsv` and fall back to
+`libx265` without it, and the server chain in `chain/server` is written for
+Intel Arc (`chain/desktop` is the NVIDIA port).
 
 What is actually verified:
 
@@ -471,8 +480,10 @@ LAN. Put it behind a reverse proxy with auth, or don't expose it.
 ## Credits
 
 All of the actual conversion is [nagadomi/nunif](https://github.com/nagadomi/nunif).
-This repository is a queue and a web front end around `python -m iw3` — it does
-not change how iw3 converts anything.
+The Fast and Custom levels are plain `python -m iw3` and change nothing about how
+iw3 converts. The multi-stage levels in [`chain/`](chain/README.md) combine
+iw3's own models and warp, and run the warp with one upstream nunif fix
+(40d46847) applied that the pinned version lacks — see `iw3_kantenfix.py`.
 
 ## License
 
