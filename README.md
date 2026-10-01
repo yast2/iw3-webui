@@ -463,7 +463,8 @@ What is actually verified:
 | AMD / ROCm | ❓ not in CI | ❓ never run |
 
 Every push builds all three CI backends and runs a smoke test that imports
-torch and iw3 inside the finished image, so a broken Dockerfile is caught Whether the *conversion* is correct on ROCm, or inside the `:cuda`
+torch and iw3 inside the finished image, so a broken Dockerfile is caught
+without hardware. Whether the *conversion* is correct on ROCm, or inside the `:cuda`
 image rather than natively, is a question this project cannot answer on its own.
 
 I would rather say "unverified" than imply a result I have never seen. If you
