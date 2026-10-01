@@ -1,11 +1,11 @@
-# Converting a file
+# Converting a file by hand
 
-The queue is the normal way to run a conversion. This file covers the other
-way: `docker exec` straight into the running container, for one-off runs and
-for trying flags the UI does not expose.
+Normally you'll use the queue. This page covers the other way: running iw3
+directly inside the container with `docker exec`. It's handy for one-off
+conversions and for trying options the web interface doesn't offer.
 
-Use the same PUID/PGID you started the container with (the examples below use
-99/100).
+Use the same PUID and PGID you started the container with. The examples below
+use 99 and 100.
 
 ```
 docker exec -u 99:100 iw3 python3 -m iw3 \
@@ -22,31 +22,30 @@ docker exec -u 99:100 iw3 python3 -m iw3 \
   -y
 ```
 
-Output lands at `/output/<original-filename>_LRF_Full_SBS.mp4` — the exact
-suffix Quest players use for stereo-format auto-detection.
+The result is saved as `/output/<original-filename>_LRF_Full_SBS.mp4`. Quest
+players use that ending to recognise the 3D format automatically.
 
-## Every flag, explained
+## What each option does
 
-| Flag | Value | Why |
+| Option | Value | Why |
 |---|---|---|
-| `-u 99:100` | (docker exec flag, not iw3's) | **Required.** `docker exec` bypasses `entrypoint.sh`'s PUID/PGID drop and runs as root by default. Without it, output files (and any new torch.hub cache entries) land root-owned and can silently block later runs as the unprivileged user. |
-| `-i` | path under `/input` | Source file. `/input` is your source share, mounted read-only. |
-| `-o` | `/output` (a **directory**, never a filename) | iw3 auto-names the output `{original}_LRF_Full_SBS.mp4` only when `-o` is a directory. Passing a filename skips the naming convention Quest players rely on for format auto-detection. |
-| `--depth-model VDA_L` | Video-Depth-Anything Large (the queue defaults to `VDA_B`, roughly twice as fast for a small quality difference) | Temporally consistent depth estimation across frames — unlike single-frame models (e.g. `Any_V2_L`), it doesn't independently re-guess depth every frame, so it doesn't flicker on video. Use `VDA_Metric_L` instead if the scene reads as flat or over-curved — it estimates absolute-scale depth rather than relative. |
-| `--divergence 2.0` | iw3 default | 3D strength / simulated eye separation. Higher = more pop, more eye strain. 2.0 is iw3's own moderate default; lower it (e.g. 1.0–1.5) for less aggressive depth. |
-| `--convergence 0.5` | iw3 default | Where the "screen plane" sits in depth. 0.5 pulls part of the scene in front of the screen; 0 keeps everything behind it. |
-| `--edge-dilation 2` | iw3 default | Expands foreground edges before warping, to hide the gap left where the background is revealed behind a moved foreground object. |
-| `--scene-detect` | on | Re-runs depth estimation from scratch at hard cuts instead of carrying state across them — without this, VDA's temporal consistency can bleed depth across a cut and produce a false sense of continuity. Matters for movies specifically. |
-| `--ema-normalize` | on | Exponential-moving-average smoothing of the per-frame depth scale. VDA's absolute depth scale jitters slightly frame to frame; this kills the resulting flicker. Recommended whenever using a VDA model (per nunif's own docs). |
-| `--video-codec libx265` | software HEVC | The only hardware-relevant option here — iw3 has no VAAPI/QSV encode path (it encodes via PyAV directly, not a system ffmpeg subprocess); this is CPU-side regardless. Depth inference is what runs on the GPU. |
-| `--gpu 0` | device index | `-1` selects the CPU; `1` a second card. The queue passes whatever `IW3_GPU` is set to. |
-| `-y` | overwrite without prompting | Needed for unattended/batch runs. |
+| `-u 99:100` | (an option of `docker exec`, not iw3) | **Don't leave it out.** `docker exec` skips the container's usual switch to PUID/PGID and runs as root. Without it, the output (and any newly downloaded model files) ends up owned by root, which can quietly break later runs. |
+| `-i` | a path under `/input` | The source file. `/input` is your video share, mounted read-only. |
+| `-o` | `/output` (a **folder**, never a file name) | iw3 only names the result `<original>_LRF_Full_SBS.mp4` when `-o` is a folder. Give it a file name and you lose the ending Quest players rely on. |
+| `--depth-model VDA_L` | Video-Depth-Anything Large | Keeps depth consistent from frame to frame. Single-frame models (such as `Any_V2_L`) guess the depth afresh for every frame, which flickers on video. The queue uses `VDA_B` by default: roughly twice as fast, with only a small loss in quality. If a scene looks flat or oddly curved, try `VDA_Metric_L`, which estimates real-world distances rather than relative ones. |
+| `--divergence 2.0` | iw3's default | How strong the 3D effect is (the simulated distance between your eyes). Higher means more depth, and more eye strain. Try 1.0–1.5 for something gentler. |
+| `--convergence 0.5` | iw3's default | Where the screen sits in depth. 0.5 brings part of the scene out in front of it; 0 keeps everything behind it. |
+| `--edge-dilation 2` | iw3's default | Widens the edges of foreground objects before the warp, to hide the gap that opens up behind them. |
+| `--scene-detect` | on | Starts the depth estimate afresh at every hard cut, rather than carrying it across. Without it, VDA can let depth leak from one scene into the next. This matters most for films. |
+| `--ema-normalize` | on | Smooths the depth scale over time. VDA's overall scale wobbles slightly from frame to frame; this removes the resulting flicker. nunif's own docs recommend it with any VDA model. |
+| `--video-codec libx265` | software HEVC | The encode always runs on the CPU: iw3 encodes through PyAV, not a system ffmpeg, so it has no VAAPI or QSV path. The depth estimation is what runs on the GPU. |
+| `--gpu 0` | device number | `-1` uses the CPU, `1` a second card. The queue passes whatever `IW3_GPU` is set to. |
+| `-y` | overwrite without asking | Needed whenever nobody is there to answer. |
 
-## Batch conversion
+## A whole folder at once
 
-`-i` also accepts a directory with `--recursive` to process a whole folder
-unattended, one file at a time (the GPU can't be shared across concurrent
-jobs — iw3 processes sequentially regardless):
+`-i` also takes a folder. With `--recursive` iw3 works through all of it,
+one file at a time (iw3 can't share a GPU between conversions anyway):
 
 ```
 docker exec -u 99:100 iw3 python3 -m iw3 \
@@ -55,4 +54,4 @@ docker exec -u 99:100 iw3 python3 -m iw3 \
   --scene-detect --ema-normalize --video-codec libx265 --gpu 0 -y
 ```
 
-`--skip-error` keeps a bad file from aborting the whole batch.
+`--skip-error` stops one bad file from ending the whole batch.

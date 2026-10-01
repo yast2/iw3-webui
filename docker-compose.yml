@@ -2,14 +2,14 @@
 #
 #   docker compose --profile cuda up -d      # NVIDIA
 #   docker compose --profile xpu  up -d      # Intel Arc
-#   docker compose --profile rocm up -d      # AMD
+#   docker compose --profile rocm up -d --build   # AMD (no prebuilt image)
 #   docker compose --profile cpu  up -d      # no GPU
 #
 # Only the device wiring differs between them - the image and the settings are
 # the same. Edit the three paths under x-common below and you are done.
 #
-# By default these pull the prebuilt images. To build locally instead, add
-# `--build` and see container/BUILD.md.
+# By default these pull the prebuilt images (cuda, xpu and cpu). To build
+# locally instead, add `--build` and see container/BUILD.md.
 
 x-common: &common
   restart: unless-stopped
@@ -31,8 +31,9 @@ x-common: &common
     # "auto" resolves to the first accelerator it can see, or the CPU if there
     # is none. Set 0/1/-1 to decide yourself.
     IW3_GPU: "auto"
-    # Length of the clip the Preview button cuts out of the middle of a source.
-    PREVIEW_CLIP_SECONDS: "120"
+    # Length of a preview in seconds. The minute itself is picked automatically
+    # (most movement, with a cut in it) - see "Previews" in the README.
+    PREVIEW_SECONDS: "60"
 
 services:
   iw3-cuda:

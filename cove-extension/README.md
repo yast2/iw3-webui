@@ -1,19 +1,21 @@
-# Add to iw3 Queue — a Cove extension
+# Add to iw3 Queue: a Cove extension
 
-Puts one button on Cove's video detail page. Clicking it hands that video to
-the [iw3 queue](../container) running elsewhere, and reports back the job id.
+This puts one button on [Cove](https://github.com/coveapp/cove)'s video page.
+Click it, and that video goes into the [iw3 queue](../container), which can
+be running anywhere, and Cove shows you the new job's ID.
 
-No conversion happens inside Cove. The extension resolves a Cove video id to a
-file path, translates that path into iw3's mount namespace, and POSTs it to
-iw3's `/api/jobs`. The job then lives entirely in iw3's queue and is tracked in
-iw3's own UI — it does not appear in Cove's job drawer.
+Nothing is converted inside Cove. The extension looks up the video's file,
+translates its path into the one iw3 sees, and sends it to iw3's `/api/jobs`.
+From then on the job lives in iw3's queue and you follow it in iw3's own
+interface; it doesn't appear in Cove's job list.
 
-Cove and iw3 need not share a Docker network, or a machine. The extension talks
-to whatever URL `IW3_WEBUI_URL` names.
+Cove and iw3 don't need to share a Docker network, or even a machine. The
+extension simply talks to whatever address `IW3_WEBUI_URL` gives it.
 
-## Build
+## Building it
 
-Fetch the reference assemblies first — see [refs/README.md](refs/README.md).
+First fetch Cove's reference assemblies (see
+[refs/README.md](refs/README.md)), then:
 
 ```sh
 docker run --rm -v "$PWD":/work -w /work/src/Iw3Queue \
@@ -21,9 +23,10 @@ docker run --rm -v "$PWD":/work -w /work/src/Iw3Queue \
   bash -c "dotnet build -c Release -o /work/out"
 ```
 
-## Install
+## Installing it
 
-Copy three files into a directory of their own under Cove's extension folder:
+Copy three files into a folder of their own in Cove's extensions folder, then
+restart Cove:
 
 ```sh
 mkdir -p /path/to/cove/config/extensions/com.yast2.iw3-queue
@@ -33,47 +36,47 @@ cp out/Iw3Queue.dll out/Iw3Queue.deps.json \
 docker restart Cove
 ```
 
-There is no `frontend/` and no JS bundle: an action with no `handlerName` is
-dispatched by Cove straight to the server endpoint, so a button that only makes
-one server call needs no client code at all.
+There's no `frontend/` folder and no JavaScript. A button whose action has no
+`handlerName` is sent by Cove straight to the server, so a button that makes
+one server call needs no browser code at all.
 
-Cove logs `iw3 Queue <version> initialised, target <url>, media root <root>,
-depth model <model>` on success. Check the media root and model in that line —
-it is the cheapest way to catch a misconfiguration before you spend GPU hours
-on it.
+When it loads, Cove logs `iw3 Queue <version> initialised, target <url>,
+media root <root>, depth model <model>`. Check the media root and the model
+in that line: it's the cheapest way to catch a mistake before it costs you
+hours of GPU time.
 
-## Configuration
+## Settings
 
-Environment variables on the **Cove** container.
+These are environment variables on the **Cove** container.
 
-| Variable | Default | Meaning |
+| Variable | Default | What it does |
 |---|---|---|
-| `IW3_WEBUI_URL` | `http://iw3:8790` | Where the iw3 queue answers |
-| `IW3_QUEUE_MEDIA_ROOT` | `/media/` | Prefix stripped from Cove's path — see below |
-| `IW3_QUEUE_STEREO_FORMAT` | `full_sbs` | Any format iw3's UI offers |
-| `IW3_QUEUE_PARAMS` | see below | JSON object, same keys as iw3's own form |
+| `IW3_WEBUI_URL` | `http://iw3:8790` | Where the iw3 queue can be reached |
+| `IW3_QUEUE_MEDIA_ROOT` | `/media/` | The part of Cove's file path to remove; see below |
+| `IW3_QUEUE_STEREO_FORMAT` | `full_sbs` | Any 3D format iw3's interface offers |
+| `IW3_QUEUE_PARAMS` | see below | A JSON object with the same keys as iw3's own settings form |
 
 ### The media root
 
-Cove and iw3 see the same files under different mount points. `IW3_QUEUE_MEDIA_ROOT`
-is the Cove side of that mapping: it is stripped from Cove's stored path, and
-what remains is the path relative to iw3's `/input`.
+Cove and iw3 usually see the same files under different paths.
+`IW3_QUEUE_MEDIA_ROOT` is Cove's half of that: it's removed from the front of
+Cove's path, and whatever is left is the path inside iw3's `/input`.
 
 With Cove mounting `/mnt/user:/media` and iw3 mounting `/mnt/user/videos:/input`:
 
 ```
-Cove path   /media/videos/films/example.mkv
-prefix      /media/videos/
-sent to iw3 films/example.mkv
+Cove path    /media/videos/films/example.mkv
+remove       /media/videos/
+sent to iw3  films/example.mkv
 ```
 
-Stripping the prefix also validates. A video outside that subtree cannot be
-reached by iw3 at all, so the click is rejected with `422` and a message naming
-both paths — rather than sending a path that would fail somewhere deeper.
+This doubles as a check. A video outside that folder can't be reached by iw3
+at all, so the click is turned down straight away with a `422` and a message
+naming both paths, rather than failing later somewhere less obvious.
 
-### The parameters
+### The conversion settings
 
-The defaults are deliberate, not decoration:
+The defaults are chosen with care:
 
 ```json
 {
@@ -85,39 +88,38 @@ The defaults are deliberate, not decoration:
 }
 ```
 
-**Do not replace this with an empty object to "use iw3's defaults".** iw3's web
-UI prefills its form from `create_parser()`, but the queue only puts fields that
-are *present* into the `python -m iw3` argv. An empty set therefore does not
-mean "the form's defaults" — it means iw3's literal CLI defaults, whose depth
-model is `ZoeD_Any_N`: the oldest single-frame model in the tree, with scene
-detection and EMA normalisation off. That mistake ran 18 jobs and 14 GPU-hours
-on the wrong model here before anyone noticed, because the output was perfectly
-valid, just worse.
+**Don't replace them with an empty object to "use iw3's defaults".** The
+web form shows values filled in from iw3's own option list, but the queue
+only passes on the settings a job actually *contains*. An empty object therefore
+doesn't mean "the form's defaults"; it means iw3's bare command-line defaults.
+Those use `ZoeD_Any_N`, the oldest single-frame depth model there is, with
+scene detection and smoothing switched off. That slip once ran 18 jobs and 14
+GPU hours on the wrong model before anyone noticed, because the results
+looked perfectly fine, just worse.
 
-If `IW3_QUEUE_PARAMS` is unparseable or empty, the extension logs a warning and
-uses the defaults above rather than sending nothing.
+If `IW3_QUEUE_PARAMS` is empty or isn't valid JSON, the extension logs a
+warning and uses the defaults above rather than sending nothing.
 
-`max_fps: 1000` is a deliberate "no cap": iw3 computes
-`output fps = min(source fps, max_fps)` with no unlimited sentinel, and its own
-GUI accepts up to 1000. Leaving the default 30 in place silently halves every
-50/60 fps source. Keep it at 15 or above — below that, iw3 quietly disables
-`ema_normalize`.
+`max_fps: 1000` means "no limit". iw3 uses `min(source fps, max_fps)` and has
+no special value for unlimited; its own desktop app goes up to 1000. Leave it
+at the default of 30 and every 50 or 60 fps video quietly loses half its
+frames. Keep it at 15 or more: below that, iw3 silently switches
+`ema_normalize` off.
 
-## What the button does not do
+## What the button doesn't do
 
-- **No file picker.** It takes Cove's own `MaxPath` — the file Cove already
-  treats as canonical for that video. No second opinion about which file is
-  "the" file.
-- **No settings dialog.** It is a quick-add. Configure the defaults once, above.
-- **No progress in Cove.** The toast reports the iw3 job id; progress lives in
-  iw3's UI.
+- **No file picker.** It uses the file Cove already treats as the main one
+  for that video (`MaxPath`).
+- **No settings dialog.** It's a quick add. Set the defaults once, as above.
+- **No progress in Cove.** The pop-up shows the iw3 job ID; you follow the
+  progress in iw3's interface.
 
 ## Permissions
 
-The endpoint requires Cove's `jobs.run` permission — the same one Cove's own
-`/api/metadata/generate` requires for starting work.
+Using the button requires Cove's `jobs.run` permission, the same one Cove's
+own `/api/metadata/generate` needs to start work.
 
-Cove logs a warning at startup that the endpoint is registered without a Cove
-authorization policy. That is expected: the check is made explicitly inside the
-handler, the same way Cove's own bundled extensions do it. The warning is about
-the declarative form being absent, not about the endpoint being open.
+At startup Cove logs a warning that the extension's endpoint is registered
+without an authorization policy. That's expected. The permission is checked
+inside the handler itself, the same way Cove's bundled extensions do it. The
+warning is about the missing declaration, not about the endpoint being open.

@@ -1,7 +1,7 @@
 # Reference assemblies
 
-The extension compiles against four of Cove's own assemblies. They are not
-redistributed here — take them from your own Cove container:
+The extension is compiled against four of Cove's own assemblies. They aren't
+included here, so copy them out of your own Cove container:
 
 ```sh
 docker cp Cove:/opt/cove/Cove.Sdk.dll     .
@@ -10,10 +10,10 @@ docker cp Cove:/opt/cove/Cove.Core.dll    .
 docker cp Cove:/opt/cove/Cove.Data.dll    .
 ```
 
-Take them from the **running container**, not from a source checkout. A
-deployed Cove build lags its own main branch, and the plugin contract differs
-between the two — compiling against the newer one produces an extension that
-loads and then fails at the first call.
+Take them from the **running container**, not from Cove's source code. A
+released Cove usually lags behind its main branch, and the extension
+interface differs between the two. Build against the newer one and you get
+an extension that loads fine and then fails on its first call.
 
-These are reference-only (`<Private>false</Private>`): nothing is copied into
-the build output. The host provides them at runtime.
+They're only needed for compiling (`<Private>false</Private>`), so nothing is
+copied into the build output. Cove provides them when the extension runs.
